@@ -1,0 +1,17 @@
+{
+  "name": "discord-gemini-bot",
+  "version": "1.0.0",
+  "description": "Discord Bot mit Kurz- und Langzeitgedaechtnis, Antworten via Google Gemini API",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "deploy-commands": "node src/deploy-commands.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "better-sqlite3": "^11.3.0",
+    "dotenv": "^16.4.5"
+  }
+}
