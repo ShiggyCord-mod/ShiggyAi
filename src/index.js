@@ -14,6 +14,7 @@ import {
 import { RateLimiter } from './rateLimiter.js';
 import { buildMemoryPage, parseMemoryButtonId } from './pagination.js';
 import { chunkText } from './textChunking.js';
+import { statusEmbed } from './statusEmbed.js';
 
 const BOT_PERSONA = process.env.BOT_PERSONA || 'Du bist ein hilfreicher Discord-Bot.';
 
@@ -92,7 +93,7 @@ client.on('messageCreate', async (message) => {
     // statt den User im Ungewissen zu lassen wann/ob eine Antwort kommt.
     if (rateLimiter.remaining() === 0) {
       await message.reply(
-        'Grad viele Anfragen unterwegs, ich muss kurz warten (Rate Limit). Antwort kommt gleich...'
+        statusEmbed("Lots of requests right now, I need to wait a sec (rate limit). Reply's coming up...")
       );
     }
     await rateLimiter.acquire();
@@ -141,12 +142,12 @@ client.on('messageCreate', async (message) => {
   } catch (err) {
     if (err instanceof GeminiRateLimitError) {
       console.warn('Gemini Rate Limit erreicht:', err.message);
-      await message.reply(formatRateLimitMessage(err));
+      await message.reply(statusEmbed(formatRateLimitMessage(err)));
       return;
     }
 
     console.error('Fehler beim Verarbeiten der Nachricht:', err);
-    await message.reply('Ups, da ist beim Nachdenken etwas schiefgelaufen. Schau mal in die Logs.');
+    await message.reply(statusEmbed('Oops, something went wrong while thinking. Check the logs.'));
   }
 });
 
@@ -222,10 +223,10 @@ client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
   if (interaction.commandName === 'ping') {
-    const sent = await interaction.reply({ content: 'Pong! Messe Latenz...', fetchReply: true });
+    const sent = await interaction.reply({ ...statusEmbed('Measuring latency...'), fetchReply: true });
     const roundtripMs = sent.createdTimestamp - interaction.createdTimestamp;
     const wsPing = Math.round(client.ws.ping);
-    await interaction.editReply(`🏓 Pong! Antwortzeit: ${roundtripMs}ms, Gateway-Ping: ${wsPing}ms`);
+    await interaction.editReply(statusEmbed(`🏓 Pong! Response time: ${roundtripMs}ms, gateway ping: ${wsPing}ms`));
     return;
   }
 
@@ -243,13 +244,13 @@ client.on('interactionCreate', async (interaction) => {
 
   if (group === 'admin') {
     if (!TRUSTED_USER_IDS.has(userId)) {
-      await interaction.reply({ content: 'Dafuer fehlt dir die Berechtigung.', ephemeral: true });
+      await interaction.reply({ ...statusEmbed("You don't have permission for that."), ephemeral: true });
       return;
     }
 
     // Server-Erinnerungen brauchen zwingend einen Server-Kontext (nicht in DMs nutzbar).
     if ((sub === 'list-server' || sub === 'forget-server' || sub === 'add-server') && !guildId) {
-      await interaction.reply({ content: 'Server-Erinnerungen gibt es nur auf einem Server, nicht in DMs.', ephemeral: true });
+      await interaction.reply({ ...statusEmbed('Server memories only exist on a server, not in DMs.'), ephemeral: true });
       return;
     }
 
@@ -257,7 +258,7 @@ client.on('interactionCreate', async (interaction) => {
       const target = interaction.options.getUser('user', true);
       const memories = getUserMemories(target.id, 200);
       if (memories.length === 0) {
-        await interaction.reply({ content: `Keine Erinnerungen ueber ${target.tag}.`, ephemeral: true });
+        await interaction.reply({ ...statusEmbed(`No memories about ${target.tag}.`), ephemeral: true });
         return;
       }
       const page = buildMemoryPage({ mode: 'user', targetUserId: target.id, page: 0, entries: memories });
@@ -267,7 +268,7 @@ client.on('interactionCreate', async (interaction) => {
     if (sub === 'list-server') {
       const memories = getGuildMemories(guildId, 200);
       if (memories.length === 0) {
-        await interaction.reply({ content: 'Keine Server-Erinnerungen auf diesem Server.', ephemeral: true });
+        await interaction.reply({ ...statusEmbed('No server memories on this server.'), ephemeral: true });
         return;
       }
       const page = buildMemoryPage({ mode: 'server', page: 0, entries: memories });
@@ -278,7 +279,7 @@ client.on('interactionCreate', async (interaction) => {
       const id = interaction.options.getInteger('id', true);
       const deleted = deleteUserMemoryAdmin(id);
       await interaction.reply({
-        content: deleted ? `Erinnerung \`${id}\` geloescht.` : `Keine Erinnerung mit ID \`${id}\` gefunden.`,
+        ...statusEmbed(deleted ? `Memory \`${id}\` deleted.` : `No memory found with ID \`${id}\`.`),
         ephemeral: true
       });
     }
@@ -287,7 +288,7 @@ client.on('interactionCreate', async (interaction) => {
       const id = interaction.options.getInteger('id', true);
       const deleted = deleteGuildMemory(id, guildId);
       await interaction.reply({
-        content: deleted ? `Erinnerung \`${id}\` geloescht.` : `Keine Erinnerung mit ID \`${id}\` gefunden.`,
+        ...statusEmbed(deleted ? `Memory \`${id}\` deleted.` : `No memory found with ID \`${id}\`.`),
         ephemeral: true
       });
     }
@@ -296,13 +297,13 @@ client.on('interactionCreate', async (interaction) => {
       const target = interaction.options.getUser('user', true);
       const content = interaction.options.getString('content', true);
       addUserMemory(target.id, content);
-      await interaction.reply({ content: `Erinnerung fuer ${target.tag} gespeichert (serveruebergreifend).`, ephemeral: true });
+      await interaction.reply({ ...statusEmbed(`Memory saved for ${target.tag} (cross-server).`), ephemeral: true });
     }
 
     if (sub === 'add-server') {
       const content = interaction.options.getString('content', true);
       addGuildMemory(guildId, content);
-      await interaction.reply({ content: 'Server-Erinnerung gespeichert.', ephemeral: true });
+      await interaction.reply({ ...statusEmbed('Server memory saved.'), ephemeral: true });
     }
 
     return;
@@ -311,25 +312,25 @@ client.on('interactionCreate', async (interaction) => {
   if (sub === 'list') {
     const memories = getUserMemories(userId, 25);
     if (memories.length === 0) {
-      await interaction.reply({ content: 'Ich merke mir aktuell nichts ueber dich.', ephemeral: true });
+      await interaction.reply({ ...statusEmbed("I don't currently remember anything about you."), ephemeral: true });
       return;
     }
     const list = memories.map((m) => `\`${m.id}\` - ${m.content}`).join('\n');
-    await interaction.reply({ content: `**Das merke ich mir ueber dich (serveruebergreifend):**\n${list}`, ephemeral: true });
+    await interaction.reply({ ...statusEmbed(list, 'What I remember about you (cross-server)'), ephemeral: true });
   }
 
   if (sub === 'forget') {
     const id = interaction.options.getInteger('id', true);
     const deleted = deleteUserMemory(id, userId);
     await interaction.reply({
-      content: deleted ? `Erinnerung \`${id}\` geloescht.` : `Keine Erinnerung mit ID \`${id}\` gefunden.`,
+      ...statusEmbed(deleted ? `Memory \`${id}\` deleted.` : `No memory found with ID \`${id}\`.`),
       ephemeral: true
     });
   }
 
   if (sub === 'clear') {
     const count = clearUserMemories(userId);
-    await interaction.reply({ content: `${count} Erinnerung(en) geloescht.`, ephemeral: true });
+    await interaction.reply({ ...statusEmbed(`Deleted ${count} ${count === 1 ? 'memory' : 'memories'}.`), ephemeral: true });
   }
 });
 
@@ -343,7 +344,7 @@ async function handleMemoryPaginationButton(interaction) {
   if (!parsed) return;
 
   if (!TRUSTED_USER_IDS.has(interaction.user.id)) {
-    await interaction.reply({ content: 'Dafuer fehlt dir die Berechtigung.', ephemeral: true });
+    await interaction.reply({ ...statusEmbed("You don't have permission for that."), ephemeral: true });
     return;
   }
 
@@ -360,7 +361,7 @@ async function handleMemoryPaginationButton(interaction) {
  * aber mit User-Gedaechtnis und - falls auf einem Server ausgefuehrt - Server-Gedaechtnis.
  */
 async function handleAskCommand(interaction) {
-  const question = interaction.options.getString('frage', true);
+  const question = interaction.options.getString('question', true);
   const guildId = interaction.guildId;
   const userId = interaction.user.id;
   const userName = interaction.member?.displayName || interaction.user.username;
@@ -395,12 +396,12 @@ async function handleAskCommand(interaction) {
   } catch (err) {
     if (err instanceof GeminiRateLimitError) {
       console.warn('Gemini Rate Limit erreicht:', err.message);
-      await interaction.editReply(formatRateLimitMessage(err));
+      await interaction.editReply(statusEmbed(formatRateLimitMessage(err)));
       return;
     }
 
     console.error('Fehler beim Verarbeiten von /ask:', err);
-    await interaction.editReply('Ups, da ist beim Nachdenken etwas schiefgelaufen. Schau mal in die Logs.');
+    await interaction.editReply(statusEmbed('Oops, something went wrong while thinking. Check the logs.'));
   }
 }
 
@@ -411,19 +412,19 @@ async function handleAskCommand(interaction) {
  */
 function formatRateLimitMessage(err) {
   if (err.isDailyQuota) {
-    const limitHint = err.dailyQuotaLimit ? ` (aktuell ${err.dailyQuotaLimit} Anfragen/Tag im Free Tier fuer dieses Modell)` : '';
+    const limitHint = err.dailyQuotaLimit ? ` (currently ${err.dailyQuotaLimit} requests/day on the free tier for this model)` : '';
     return (
-      `Tageskontingent von Gemini ist fuer heute aufgebraucht${limitHint}. ` +
-      'Das setzt sich erst zurueck, wenn bei Google der Tag umspringt (Mitternacht Pacific Time) - ' +
-      'kurz warten und nochmal probieren bringt nichts. Aktuellen Stand siehst du live unter ' +
-      'https://aistudio.google.com/rate-limit, alternativ GEMINI_MODEL wechseln oder auf ein bezahltes Tier upgraden.'
+      `Gemini's daily quota is used up for today${limitHint}. ` +
+      "It only resets once Google's day rolls over (midnight Pacific Time) - " +
+      'waiting a bit and trying again will not help. Check the live status at ' +
+      'https://aistudio.google.com/rate-limit, or switch GEMINI_MODEL, or upgrade to a paid tier.'
     );
   }
 
   const waitHint = err.retryAfterSeconds
-    ? ` Google sagt, in ca. ${err.retryAfterSeconds}s geht's wieder.`
-    : ' Versuchs in ein, zwei Minuten nochmal.';
-  return `Gemini ist gerade ausgelastet (Rate Limit erreicht).${waitHint}`;
+    ? ` Google says it should work again in about ${err.retryAfterSeconds}s.`
+    : ' Try again in a minute or two.';
+  return `Gemini is busy right now (rate limit reached).${waitHint}`;
 }
 
 /**

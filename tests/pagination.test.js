@@ -45,7 +45,7 @@ test('buildMemoryPage clamped eine ausserhalb liegende Seitenzahl auf die letzte
   const page = buildMemoryPage({ mode: 'user', targetUserId: 'u1', page: 99, entries });
   const text = page.components[0].components[0].data.content;
 
-  assert.match(text, /Seite 1\/1/);
+  assert.match(text, /Page 1\/1/);
 });
 
 test('buildMemoryPage im server-Modus zeigt den Server-Titel statt eines User-Tags', () => {
@@ -53,7 +53,7 @@ test('buildMemoryPage im server-Modus zeigt den Server-Titel statt eines User-Ta
   const page = buildMemoryPage({ mode: 'server', page: 0, entries });
   const text = page.components[0].components[0].data.content;
 
-  assert.match(text, /Server-Erinnerungen/);
+  assert.match(text, /Server memories/);
   assert.match(text, /fakt-1/);
   assert.match(text, /fakt-2/);
 });

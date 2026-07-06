@@ -8,84 +8,84 @@ const EVERYWHERE_CONTEXTS = [InteractionContextType.Guild, InteractionContextTyp
 export const commands = [
   new SlashCommandBuilder()
     .setName('memory')
-    .setDescription('Verwalte was der Bot sich ueber dich merkt (serveruebergreifend)')
+    .setDescription('Manage what the bot remembers about you (cross-server)')
     .setIntegrationTypes(EVERYWHERE_INTEGRATION_TYPES)
     .setContexts(EVERYWHERE_CONTEXTS)
     .addSubcommand(sub =>
-      sub.setName('list').setDescription('Zeigt an, was sich der Bot ueber dich merkt (serveruebergreifend)')
+      sub.setName('list').setDescription('Show what the bot remembers about you (cross-server)')
     )
     .addSubcommand(sub =>
       sub
         .setName('forget')
-        .setDescription('Loescht eine einzelne Erinnerung anhand ihrer ID')
+        .setDescription('Delete a single memory by its ID')
         .addIntegerOption(opt =>
-          opt.setName('id').setDescription('Die ID aus /memory list').setRequired(true)
+          opt.setName('id').setDescription('The ID from /memory list').setRequired(true)
         )
     )
     .addSubcommand(sub =>
-      sub.setName('clear').setDescription('Loescht ALLE Erinnerungen die der Bot ueber dich hat')
+      sub.setName('clear').setDescription('Delete ALL memories the bot has about you')
     )
     .addSubcommandGroup(group =>
       group
         .setName('admin')
-        .setDescription('Nur fuer vertrauenswuerdige User (TRUSTED_USER_IDS)')
+        .setDescription('Trusted users only (TRUSTED_USER_IDS)')
         .addSubcommand(sub =>
           sub
             .setName('list-user')
-            .setDescription('Zeigt alle Erinnerungen ueber einen User (serveruebergreifend, mit IDs)')
+            .setDescription('Show all memories about a user (cross-server, with IDs)')
             .addUserOption(opt =>
-              opt.setName('user').setDescription('Der User, dessen Erinnerungen angezeigt werden sollen').setRequired(true)
+              opt.setName('user').setDescription('The user whose memories should be shown').setRequired(true)
             )
         )
         .addSubcommand(sub =>
-          sub.setName('list-server').setDescription('Zeigt die Server-Erinnerungen dieses Servers (mit IDs)')
+          sub.setName('list-server').setDescription("Show this server's memories (with IDs)")
         )
         .addSubcommand(sub =>
           sub
             .setName('forget-user')
-            .setDescription('Loescht eine User-Erinnerung anhand ihrer ID (serveruebergreifend)')
+            .setDescription('Delete a user memory by its ID (cross-server)')
             .addIntegerOption(opt =>
-              opt.setName('id').setDescription('Die Memory-ID aus /memory admin list-user').setRequired(true)
+              opt.setName('id').setDescription('The memory ID from /memory admin list-user').setRequired(true)
             )
         )
         .addSubcommand(sub =>
           sub
             .setName('forget-server')
-            .setDescription('Loescht eine Server-Erinnerung anhand ihrer ID (nur dieser Server)')
+            .setDescription('Delete a server memory by its ID (this server only)')
             .addIntegerOption(opt =>
-              opt.setName('id').setDescription('Die Memory-ID aus /memory admin list-server').setRequired(true)
+              opt.setName('id').setDescription('The memory ID from /memory admin list-server').setRequired(true)
             )
         )
         .addSubcommand(sub =>
           sub
             .setName('add-user')
-            .setDescription('Fuegt manuell eine Erinnerung ueber einen User hinzu (serveruebergreifend)')
+            .setDescription('Manually add a memory about a user (cross-server)')
             .addUserOption(opt =>
-              opt.setName('user').setDescription('Der User, fuer den die Erinnerung gespeichert wird').setRequired(true)
+              opt.setName('user').setDescription('The user this memory is saved for').setRequired(true)
             )
             .addStringOption(opt =>
-              opt.setName('content').setDescription('Der Inhalt der Erinnerung').setRequired(true)
+              opt.setName('content').setDescription('The content of the memory').setRequired(true)
             )
         )
         .addSubcommand(sub =>
           sub
             .setName('add-server')
-            .setDescription('Fuegt manuell eine Server-Erinnerung fuer diesen Server hinzu')
+            .setDescription('Manually add a server memory for this server')
             .addStringOption(opt =>
-              opt.setName('content').setDescription('Der Inhalt der Erinnerung').setRequired(true)
+              opt.setName('content').setDescription('The content of the memory').setRequired(true)
             )
         )
     ),
   new SlashCommandBuilder()
     .setName('ping')
-    .setDescription('Zeigt die aktuelle Bot-Latenz an')
+    .setDescription("Show the bot's current latency")
     .setIntegrationTypes(EVERYWHERE_INTEGRATION_TYPES)
     .setContexts(EVERYWHERE_CONTEXTS),
   new SlashCommandBuilder()
     .setName('ask')
-    .setDescription('Stell dem Bot eine Frage - funktioniert ueberall, auch in DMs und auf fremden Servern')
+    .setDescription('Ask the bot a question - works everywhere, including DMs and other servers')
     .addStringOption(opt =>
-      opt.setName('frage').setDescription('Deine Frage an den Bot').setRequired(true)
+      opt.setName('question').setDescription('Your question for the bot').setRequired(true)
     )
     .setIntegrationTypes(EVERYWHERE_INTEGRATION_TYPES)
     .setContexts(EVERYWHERE_CONTEXTS)

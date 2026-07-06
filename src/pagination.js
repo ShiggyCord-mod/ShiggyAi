@@ -18,27 +18,27 @@ export function buildMemoryPage({ mode, targetUserId = null, page, entries, page
   const clampedPage = Math.min(Math.max(page, 0), totalPages - 1);
   const pageEntries = entries.slice(clampedPage * pageSize, clampedPage * pageSize + pageSize);
 
-  const lines = pageEntries.length ? pageEntries.map((m) => `\`${m.id}\` - ${m.content}`) : ['_Keine Eintraege._'];
+  const lines = pageEntries.length ? pageEntries.map((m) => `\`${m.id}\` - ${m.content}`) : ['_No entries._'];
 
   const title =
     mode === 'server'
-      ? '**Server-Erinnerungen (gelten fuer alle User hier, nicht serveruebergreifend)**'
-      : `**Erinnerungen ueber <@${targetUserId}> (serveruebergreifend)**`;
+      ? '**Server memories (apply to everyone here, not cross-server)**'
+      : `**Memories about <@${targetUserId}> (cross-server)**`;
 
   const container = new ContainerBuilder().addTextDisplayComponents(
-    new TextDisplayBuilder().setContent(`${title} (Seite ${clampedPage + 1}/${totalPages})\n${lines.join('\n')}`)
+    new TextDisplayBuilder().setContent(`${title} (Page ${clampedPage + 1}/${totalPages})\n${lines.join('\n')}`)
   );
 
   const targetPart = targetUserId || '-';
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`mem:${mode}:${targetPart}:${clampedPage - 1}`)
-      .setLabel('◀ Zurueck')
+      .setLabel('◀ Back')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(clampedPage <= 0),
     new ButtonBuilder()
       .setCustomId(`mem:${mode}:${targetPart}:${clampedPage + 1}`)
-      .setLabel('Weiter ▶')
+      .setLabel('Next ▶')
       .setStyle(ButtonStyle.Secondary)
       .setDisabled(clampedPage >= totalPages - 1)
   );

@@ -14,7 +14,7 @@ const MAX_MEMORY_ITEMS_BATCH = 20; // extractMemories: Batch kann mehrere User b
 export const MAX_MEMORY_LENGTH = 300; // max. Zeichen pro Memory-Eintrag
 const MAX_LOG_TEXT_LENGTH = 500; // Rohtext-Logging bei Parse-Fehlern deckeln
 export const GENERIC_FALLBACK_REPLY =
-  'Ups, da kam bei mir eine kaputte Antwort an. Probiers nochmal oder formulier die Frage etwas anders.';
+  'Oops, I got a broken response. Try again, or phrase your question a bit differently.';
 
 /**
  * Eigener Error-Typ fuer den Fall, dass Gemini selbst mit 429 antwortet
