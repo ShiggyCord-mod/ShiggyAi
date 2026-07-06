@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import { Client, GatewayIntentBits, MessageFlags, Partials } from 'discord.js';
-import { askGemini, extractMemories, GeminiRateLimitError } from './gemini.js';
+import { askGemini, extractMemories, GeminiRateLimitError, GENERIC_FALLBACK_REPLY } from './gemini.js';
 import {
   addUserMemory,
   addGuildMemory,
@@ -138,7 +138,11 @@ client.on('messageCreate', async (message) => {
       addGuildMemory(message.guild.id, mem);
     }
 
-    await sendChunked(message, reply);
+    if (reply === GENERIC_FALLBACK_REPLY) {
+      await message.reply(statusEmbed(reply));
+    } else {
+      await sendChunked(message, reply);
+    }
   } catch (err) {
     if (err instanceof GeminiRateLimitError) {
       console.warn('Gemini Rate Limit erreicht:', err.message);
@@ -392,7 +396,11 @@ async function handleAskCommand(interaction) {
       }
     }
 
-    await sendChunkedReply(interaction, reply);
+    if (reply === GENERIC_FALLBACK_REPLY) {
+      await interaction.editReply(statusEmbed(reply));
+    } else {
+      await sendChunkedReply(interaction, reply);
+    }
   } catch (err) {
     if (err instanceof GeminiRateLimitError) {
       console.warn('Gemini Rate Limit erreicht:', err.message);
