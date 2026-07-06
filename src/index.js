@@ -13,6 +13,7 @@ import {
 } from './db.js';
 import { RateLimiter } from './rateLimiter.js';
 import { buildMemoryPage, parseMemoryButtonId } from './pagination.js';
+import { chunkText } from './textChunking.js';
 
 const BOT_PERSONA = process.env.BOT_PERSONA || 'Du bist ein hilfreicher Discord-Bot.';
 
@@ -24,7 +25,6 @@ const TRUSTED_USER_IDS = new Set(
     .filter(Boolean)
 );
 const SHORT_TERM_CONTEXT_LIMIT = parseInt(process.env.SHORT_TERM_CONTEXT_LIMIT || '15', 10);
-const DISCORD_MSG_LIMIT = 2000;
 
 // Clientseitiges Limit, wieviele Gemini-Requests pro Minute rausgehen duerfen.
 // Der Gemini Free Tier liegt je nach Modell aktuell bei ca. 10-15 RPM (Flash-Modelle),
@@ -431,11 +431,7 @@ function formatRateLimitMessage(err) {
  * followUp fuer den Rest, statt message.reply/channel.send).
  */
 async function sendChunkedReply(interaction, text) {
-  if (text.length <= DISCORD_MSG_LIMIT) {
-    await interaction.editReply(text);
-    return;
-  }
-  const chunks = text.match(new RegExp(`.{1,${DISCORD_MSG_LIMIT}}`, 'gs')) || [text];
+  const chunks = chunkText(text);
   await interaction.editReply(chunks[0]);
   for (let i = 1; i < chunks.length; i++) {
     await interaction.followUp(chunks[i]);
@@ -455,11 +451,7 @@ function cleanContent(message, botId) {
  * Discord-Nachrichten sind auf 2000 Zeichen begrenzt - lange Antworten aufteilen.
  */
 async function sendChunked(message, text) {
-  if (text.length <= DISCORD_MSG_LIMIT) {
-    await message.reply(text);
-    return;
-  }
-  const chunks = text.match(new RegExp(`.{1,${DISCORD_MSG_LIMIT}}`, 'gs')) || [text];
+  const chunks = chunkText(text);
   for (let i = 0; i < chunks.length; i++) {
     if (i === 0) {
       await message.reply(chunks[i]);

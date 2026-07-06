@@ -3,6 +3,19 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite';
 
 const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
+// Sicherheitsnetz gegen ausufernde/kaputte Antworten (siehe Vorfall: Modell generierte endlos
+// fast-identische Memory-Strings bis zum impliziten Token-Limit -> riesige, nicht parsbare
+// Antwort, die roh in Discord landete). Bewusst interne Konstanten statt .env-Variablen: das ist
+// ein Sicherheits-Invariant, kein Tuning-Knopf, den man versehentlich zu hoch drehen koennen sollte.
+const MAX_OUTPUT_TOKENS_REPLY = 2048; // askGemini: Chat-Reply + ein paar kurze Memory-Strings
+const MAX_OUTPUT_TOKENS_EXTRACT = 1024; // extractMemories: kein Freitext-Reply noetig
+export const MAX_MEMORY_ITEMS = 5; // askGemini: neue Memories pro Antwort
+const MAX_MEMORY_ITEMS_BATCH = 20; // extractMemories: Batch kann mehrere User betreffen
+export const MAX_MEMORY_LENGTH = 300; // max. Zeichen pro Memory-Eintrag
+const MAX_LOG_TEXT_LENGTH = 500; // Rohtext-Logging bei Parse-Fehlern deckeln
+export const GENERIC_FALLBACK_REPLY =
+  'Ups, da kam bei mir eine kaputte Antwort an. Probiers nochmal oder formulier die Frage etwas anders.';
+
 /**
  * Eigener Error-Typ fuer den Fall, dass Gemini selbst mit 429 antwortet
  * (z.B. weil das clientseitige Limit nicht zum echten Google-Limit passt,
@@ -65,7 +78,9 @@ function buildSystemInstruction(persona, userMemories, serverMemories) {
     'Formuliere neue Erinnerungen immer neutral in der 3. Person (z.B. "behauptet, mit dir verheiratet zu sein"), ' +
     'nicht direkt an ihn/dich adressiert (also nicht "Du bist mit mir verheiratet"). ' +
     'Fuer normale Konversation gib jeweils ein leeres Array zurueck. ' +
-    'Erfinde niemals Fakten und wiederhole keine Erinnerung, die du oben schon kennst.';
+    'Erfinde niemals Fakten und wiederhole keine Erinnerung, die du oben schon kennst. ' +
+    'Halte new_user_memories und new_server_memories IMMER kurz: hoechstens ein paar (max. 5) ' +
+    'praegnante Ein-Satz-Fakten pro Antwort, keine langen Aufzaehlungen oder Wiederholungen.';
 
   return text;
 }
@@ -100,14 +115,15 @@ function buildContents(shortTermMessages, currentUserName, currentUserMessage) {
  * bei 429, sonst einen normalen Error bei anderen HTTP-Fehlern.
  * @returns {Promise<string>} der rohe Text der Antwort (noch nicht geparst)
  */
-async function callGemini({ systemInstruction, contents, responseSchema, temperature }) {
+async function callGemini({ systemInstruction, contents, responseSchema, temperature, maxOutputTokens }) {
   const body = {
     system_instruction: { parts: [{ text: systemInstruction }] },
     contents,
     generationConfig: {
       responseMimeType: 'application/json',
       responseSchema,
-      temperature
+      temperature,
+      maxOutputTokens
     }
   };
 
@@ -141,10 +157,17 @@ async function callGemini({ systemInstruction, contents, responseSchema, tempera
   }
 
   const data = await res.json();
-  const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  const candidate = data?.candidates?.[0];
+  const rawText = candidate?.content?.parts?.[0]?.text;
 
   if (!rawText) {
     throw new Error('Gemini hat keine verwertbare Antwort geliefert.');
+  }
+
+  if (candidate?.finishReason === 'MAX_TOKENS') {
+    // rawText ist dann mitten im String abgeschnitten und meist kein valides JSON mehr -
+    // der JSON.parse-Fallback beim Aufrufer faengt das sicher ab, das hier ist nur fuers Log.
+    console.warn('Gemini-Antwort erreichte maxOutputTokens und wurde abgeschnitten (finishReason: MAX_TOKENS).');
   }
 
   return rawText;
@@ -170,22 +193,43 @@ export async function askGemini({ persona, shortTermMessages, userMemories, serv
       },
       required: ['reply']
     },
-    temperature: 0.8
+    temperature: 0.8,
+    maxOutputTokens: MAX_OUTPUT_TOKENS_REPLY
   });
 
   let parsed;
   try {
     parsed = JSON.parse(rawText);
   } catch (e) {
-    // Fallback: falls trotz responseSchema mal kein sauberes JSON zurueckkommt
-    return { reply: rawText, newUserMemories: [], newServerMemories: [] };
+    // Rohtext NIE als reply zurueckgeben - kann bei Truncation ein riesiger, kaputter Blob sein
+    // (siehe Vorfall). Stattdessen eine kurze, sichere generische Antwort.
+    console.error('askGemini: Antwort war kein valides JSON. Rohtext (gekuerzt):', truncateForLog(rawText));
+    return { reply: GENERIC_FALLBACK_REPLY, newUserMemories: [], newServerMemories: [] };
   }
 
   return {
     reply: parsed.reply ?? '(keine Antwort)',
-    newUserMemories: Array.isArray(parsed.new_user_memories) ? parsed.new_user_memories : [],
-    newServerMemories: Array.isArray(parsed.new_server_memories) ? parsed.new_server_memories : []
+    newUserMemories: sanitizeMemoryList(parsed.new_user_memories, MAX_MEMORY_ITEMS),
+    newServerMemories: sanitizeMemoryList(parsed.new_server_memories, MAX_MEMORY_ITEMS)
   };
+}
+
+function truncate(str, maxLen) {
+  return str.length > maxLen ? str.slice(0, maxLen) : str;
+}
+
+function truncateForLog(text) {
+  return text.length > MAX_LOG_TEXT_LENGTH
+    ? `${text.slice(0, MAX_LOG_TEXT_LENGTH)}... [gekuerzt, ${text.length} Zeichen gesamt]`
+    : text;
+}
+
+function sanitizeMemoryList(list, maxItems) {
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter((m) => typeof m === 'string' && m.trim())
+    .slice(0, maxItems)
+    .map((m) => truncate(m.trim(), MAX_MEMORY_LENGTH));
 }
 
 /**
@@ -206,7 +250,8 @@ export async function extractMemories({ persona, messages }) {
     'aus der der Fakt stammt; (2) server_memories - Fakten UEBER DEN SERVER/DIE COMMUNITY als Ganzes (Thema des ' +
     'Servers, gemeinsame Regeln, wiederkehrende Events), nicht an eine UserID gebunden. ' +
     'Formuliere jeden Fakt neutral in der 3. Person. Gib NUR wirklich merkenswerte, neue Fakten zurueck - fuer ' +
-    'normalen Chat/Small-Talk gib leere Arrays zurueck. Erfinde niemals Fakten.';
+    'normalen Chat/Small-Talk gib leere Arrays zurueck. Erfinde niemals Fakten. ' +
+    'Formuliere jeden Fakt kurz und praegnant (ein Satz) und wiederhole keinen Fakt mehrfach.';
 
   const transcript = messages.map((m) => `UserID ${m.authorId} (${m.authorName}): ${m.content}`).join('\n');
 
@@ -231,7 +276,8 @@ export async function extractMemories({ persona, messages }) {
       },
       required: ['user_memories', 'server_memories']
     },
-    temperature: 0.4
+    temperature: 0.4,
+    maxOutputTokens: MAX_OUTPUT_TOKENS_EXTRACT
   });
 
   let parsed;
@@ -244,12 +290,11 @@ export async function extractMemories({ persona, messages }) {
   const userMemories = Array.isArray(parsed.user_memories)
     ? parsed.user_memories
         .filter((m) => m && typeof m.user_id === 'string' && typeof m.content === 'string' && m.content.trim())
-        .map((m) => ({ userId: m.user_id, content: m.content.trim() }))
+        .slice(0, MAX_MEMORY_ITEMS_BATCH)
+        .map((m) => ({ userId: m.user_id, content: truncate(m.content.trim(), MAX_MEMORY_LENGTH) }))
     : [];
 
-  const serverMemories = Array.isArray(parsed.server_memories)
-    ? parsed.server_memories.filter((m) => typeof m === 'string' && m.trim()).map((m) => m.trim())
-    : [];
+  const serverMemories = sanitizeMemoryList(parsed.server_memories, MAX_MEMORY_ITEMS_BATCH);
 
   return { userMemories, serverMemories };
 }

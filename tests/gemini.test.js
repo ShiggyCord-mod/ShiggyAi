@@ -4,14 +4,21 @@ import assert from 'node:assert/strict';
 process.env.GEMINI_API_KEY = 'test-key';
 process.env.GEMINI_MODEL = 'gemini-test-model';
 
-const { askGemini, extractMemories, GeminiRateLimitError } = await import('../src/gemini.js');
+const { askGemini, extractMemories, GeminiRateLimitError, GENERIC_FALLBACK_REPLY, MAX_MEMORY_ITEMS, MAX_MEMORY_LENGTH } =
+  await import('../src/gemini.js');
 
 function mockFetchOnce(response) {
   const original = globalThis.fetch;
-  globalThis.fetch = async () => response;
-  return () => {
+  const calls = [];
+  globalThis.fetch = async (url, options) => {
+    calls.push({ url, options });
+    return response;
+  };
+  const restore = () => {
     globalThis.fetch = original;
   };
+  restore.calls = calls;
+  return restore;
 }
 
 const baseArgs = {
@@ -73,17 +80,70 @@ test('askGemini liefert leere Arrays, wenn new_user_memories/new_server_memories
   }
 });
 
-test('askGemini faellt auf rohen Text zurueck, wenn die Antwort kein valides JSON ist', async () => {
+test('askGemini gibt eine generische Fallback-Antwort zurueck statt kaputtem Rohtext', async () => {
   const restore = mockFetchOnce({
     ok: true,
     json: async () => ({
-      candidates: [{ content: { parts: [{ text: 'kein json hier' }] } }]
+      candidates: [{ content: { parts: [{ text: 'kein json hier, '.repeat(500) }] } }]
     })
   });
 
   try {
     const result = await askGemini(baseArgs);
-    assert.deepEqual(result, { reply: 'kein json hier', newUserMemories: [], newServerMemories: [] });
+    assert.deepEqual(result, { reply: GENERIC_FALLBACK_REPLY, newUserMemories: [], newServerMemories: [] });
+  } finally {
+    restore();
+  }
+});
+
+test('askGemini kappt new_user_memories/new_server_memories auf MAX_MEMORY_ITEMS Eintraege und MAX_MEMORY_LENGTH Zeichen', async () => {
+  const longEntry = 'x'.repeat(1000);
+  const restore = mockFetchOnce({
+    ok: true,
+    json: async () => ({
+      candidates: [
+        {
+          content: {
+            parts: [
+              {
+                text: JSON.stringify({
+                  reply: 'ok',
+                  new_user_memories: Array.from({ length: 50 }, () => longEntry),
+                  new_server_memories: Array.from({ length: 50 }, () => longEntry)
+                })
+              }
+            ]
+          }
+        }
+      ]
+    })
+  });
+
+  try {
+    const result = await askGemini(baseArgs);
+    assert.equal(result.newUserMemories.length, MAX_MEMORY_ITEMS);
+    assert.equal(result.newServerMemories.length, MAX_MEMORY_ITEMS);
+    for (const m of [...result.newUserMemories, ...result.newServerMemories]) {
+      assert.equal(m.length, MAX_MEMORY_LENGTH);
+    }
+  } finally {
+    restore();
+  }
+});
+
+test('askGemini setzt maxOutputTokens im generationConfig', async () => {
+  const restore = mockFetchOnce({
+    ok: true,
+    json: async () => ({
+      candidates: [{ content: { parts: [{ text: JSON.stringify({ reply: 'ok' }) }] } }]
+    })
+  });
+
+  try {
+    await askGemini(baseArgs);
+    const body = JSON.parse(restore.calls[0].options.body);
+    assert.equal(typeof body.generationConfig.maxOutputTokens, 'number');
+    assert.ok(body.generationConfig.maxOutputTokens > 0);
   } finally {
     restore();
   }
