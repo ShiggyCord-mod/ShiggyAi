@@ -48,6 +48,13 @@ const LEARNING_BATCH_SIZE = parseInt(process.env.LEARNING_BATCH_SIZE || '20', 10
 const LEARNING_SWEEP_INTERVAL_MINUTES = parseInt(process.env.LEARNING_SWEEP_INTERVAL_MINUTES || '10', 10);
 const LEARNING_MIN_SWEEP_SIZE = 3;
 
+// Speicherdeckel: Channels mit weniger als LEARNING_MIN_SWEEP_SIZE Nachrichten werden nie
+// geflusht und bleiben sonst dauerhaft im Speicher liegen - bei vielen (auch stillen) Channels
+// waechst die Map also unbegrenzt. Ist der Deckel erreicht, fliegt der aelteste Eintrag raus
+// (Map behaelt Einfuegereihenfolge). Pro Channel ist die Groesse bereits durch
+// LEARNING_BATCH_SIZE begrenzt, da dann automatisch geflusht wird.
+const MAX_LEARNING_CHANNELS = 200;
+
 // channelId -> { guildId, messages: [{authorId, authorName, content}] }
 const learningBuffers = new Map();
 
@@ -60,7 +67,8 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
-client.once('ready', () => {
+// 'ready' ist ab discord.js v14.22 deprecated (heisst in v15 nur noch 'clientReady').
+client.once('clientReady', () => {
   console.log(`Eingeloggt als ${client.user.tag}`);
 });
 
@@ -167,6 +175,10 @@ function bufferForPassiveLearning(message) {
   const channelId = message.channel.id;
   let entry = learningBuffers.get(channelId);
   if (!entry) {
+    if (learningBuffers.size >= MAX_LEARNING_CHANNELS) {
+      const oldestChannelId = learningBuffers.keys().next().value;
+      learningBuffers.delete(oldestChannelId);
+    }
     entry = { guildId: message.guild.id, messages: [] };
     learningBuffers.set(channelId, entry);
   }
