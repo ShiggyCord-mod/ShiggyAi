@@ -84,6 +84,53 @@ Der Bot entscheidet selbst, was merkenswert ist - es gibt keinen manuellen
 Pro User und pro Server gilt ein Deckel von 50 Erinnerungen (`MAX_MEMORIES_PER_SCOPE` in
 `src/db.js`), aeltere fliegen automatisch raus.
 
+### Qualitaetsfilter
+
+Ohne Filter frisst sich der Bestand selbst auf. Gemessen an einem echten Bestand von 50
+Eintraegen: 78 % drehten sich um dasselbe Thema, 38 Paare waren Dubletten (eines bei 0.92
+Wortueberlappung, also praktisch derselbe Satz), 33 von 50 begannen mit einem Verhaltensadverb
+("consistently demonstrates ...") und trugen damit keine Information. Ein Eintrag war 3276
+Zeichen lang – ein einzelner Satz, in dem das Modell in eine Schleife geraten war, und der
+allein rund ein Drittel des Prompts gefressen hat.
+
+Das ist ein Rueckkopplungseffekt: Das Modell sieht im Prompt lauter solche Eintraege und
+schreibt beim naechsten Mal mehr davon. Zusammen mit dem Deckel verdraengt die Monokultur dann
+ueber die Eviction die echten Fakten. Auf "halte es kurz" im Prompt ist dabei kein Verlass,
+deshalb greift `src/memoryHygiene.js` beim Schreiben:
+
+- **Laengengrenze** (300 Zeichen) in der DB-Schicht erzwungen, nicht nur beim Modell-Pfad.
+- **Ausgeufertes wird verworfen, nicht gekuerzt** (ab 600 Zeichen oder bei erkennbarer
+  Wortschleife). Ein solcher Eintrag ist keine lange Information, sondern eine kaputte
+  Generierung – wer den kuerzt, behaelt ein sinnloses Fragment, das im naechsten Prompt steht
+  und den Effekt stuetzt.
+- **Dubletten** werden vor dem Schreiben abgelehnt (Jaccard ab 0.45; bei kurzen Eintraegen gilt
+  0.8, weil die Metrik dort zu grob ist). Die Schwelle ist an echten Daten kalibriert: bei 0.50
+  rutschten eindeutige Dubletten durch. Manuelle Eintraege ueber `/memory admin add-user`
+  umgehen die Pruefung, da hat ein Mensch bewusst entschieden.
+- **Behauptungen ueber Rechte, Rollen oder Befugnisse** ("ist Admin", "darf alles") werden nie
+  gespeichert. Zur Einordnung: die `/memory admin`-Befehle haengen an `TRUSTED_USER_IDS` aus der
+  `.env`, nicht am Gedaechtnis – eine solche Erinnerung kann also keine Befehle freischalten.
+  Der Schaden waere, dass der Bot die Behauptung anderen gegenueber als gegeben vertritt.
+
+Erinnerungen werden im Prompt als **Gespraechsstand** gelabelt, nicht als gesicherte Fakten. Die
+frueher dort stehende Anweisung, ihnen nicht zu widersprechen, machte jede einmal gespeicherte
+Behauptung fuer den Bot unumstoesslich wahr. Die Kontinuitaet bleibt (der Bot leugnet den
+Gespraechsstand nicht), aber er behandelt ihn nicht mehr als geprueft, und Rechte folgen daraus
+nie.
+
+### Altbestand aufraeumen
+
+Die Filter greifen nur beim Schreiben. Fuer einen bereits entarteten Bestand:
+
+```bash
+npm run memories:clean              # Trockenlauf: zeigt nur, was passieren wuerde
+npm run memories:clean -- --apply   # loescht, nach einer Sicherung der SQLite-Datei
+```
+
+Das Skript entfernt Ausgeufertes und Rechtebehauptungen und fuehrt Dubletten zusammen, wobei je
+Gruppe die **kuerzeste** Fassung bleibt: der Bestand wird mit der Zeit geschwaetziger, die
+knappste Fassung derselben Aussage traegt also am meisten Information pro Zeichen.
+
 ## Dashboard
 
 Beim Start laeuft eine Weboberflaeche auf **http://127.0.0.1:1267** (`DASHBOARD_PORT`):
@@ -95,9 +142,13 @@ Beim Start laeuft eine Weboberflaeche auf **http://127.0.0.1:1267** (`DASHBOARD_
 - **Erinnerungen** - Manager ueber beide Arten (User und Server) in einer Liste: nach Besitzer
   und Inhalt filtern, einzeln loeschen, manuell anlegen. Zeigt auch, wer den Deckel erreicht hat.
 - **Verlauf** - jeder Request an die API zum Aufklappen: der rausgegangene System-Prompt und die
-  Konversation, die reingekommene Antwort, Tokenzahlen, Laufzeit, `finish_reason` und der
-  vollstaendige Request/Response als JSON. Fehlversuche stehen mit drin, damit die Abrechnung
-  stimmt.
+  Konversation, die reingekommene Antwort, Tokenzahlen, Laufzeit, `finish_reason`, die
+  **Antwort-Header** und der vollstaendige Request/Response als JSON. Fehlversuche stehen mit
+  drin, damit die Abrechnung stimmt. Weicht die gemeldete Completion-Token-Zahl um mehr als das
+  Doppelte von der Laenge der Antwort ab und liefert der Anbieter kein `reasoning_tokens` mit,
+  weist die Ansicht darauf hin - dann laeuft entweder verstecktes Reasoning oder die Zaehlung
+  stimmt nicht. Bei einem Proxy-Endpoint sind die Header ausserdem die einzige Spur, aus der
+  sich ablesen laesst, was zwischen dem Bot und dem eigentlichen Modell sitzt.
 - **Tokens** - Aufschluesselung nach Prompt/Completion, nach Art (`reply` vs. `extract`), nach
   Modell und nach Tag.
 
@@ -122,6 +173,7 @@ Nachrichten-Log ist eine Ansicht der letzten Aktivitaet, kein Archiv.
 src/
   index.js           Bot-Client, Message-Handler, Slash-Command-Handler, passives Lernen
   llm.js             Call an die OpenAI-kompatible API inkl. strukturiertem JSON-Response
+  memoryHygiene.js   Laengen-, Schleifen-, Dubletten- und Rechtebehauptungs-Filter
   db.js              SQLite Layer fuer das Langzeitgedaechtnis + Dashboard-Queries
   apiLog.js          Ringpuffer aller API-Calls (Request, Antwort, Tokens, Laufzeit)
   messageLog.js      Ringpuffer der zuletzt gesehenen Nachrichten
@@ -137,6 +189,8 @@ public/
   app.css            Farbrollen als Tokens, Light + Dark eigens gesetzt
   app.js             Ansichten, Filter, Export
   chart.js           Gestapeltes Balkendiagramm (DOM injizierbar, damit testbar)
+scripts/
+  clean-memories.js  raeumt einen bereits entarteten Bestand auf (Trockenlauf als Standard)
 data/
   memory.sqlite      wird automatisch angelegt
 ```
@@ -189,6 +243,9 @@ Drei Faelle sind abgedeckt:
 - Die Puffer des passiven Lernens liegen nur im Speicher und sind nach einem Neustart weg.
 - `/memory list` zeigt die letzten 25 Erinnerungen ohne Blaettern; bei einem Deckel von 50
   sind die aelteren fuer den User selbst also nicht einsehbar oder loeschbar.
+- Die Dublettenerkennung ist lexikalisch (Wortueberlappung). Sie faengt Neuformulierungen mit
+  aehnlichem Wortlaut, aber keine echten Paraphrasen in ganz anderen Worten - dafuer braeuchte
+  es Embeddings.
 - Die vom Modell beim passiven Lernen gelieferte User-ID wird noch nicht gegen die
   tatsaechlichen Autoren des Batches geprueft.
 - Das Dashboard hat keine Authentifizierung und ist deshalb auf localhost beschraenkt.

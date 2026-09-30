@@ -363,6 +363,13 @@ $('#callClear').addEventListener('click', async () => {
   } catch (e) { toast(e.message, true); }
 });
 
+/** Zeigt die Completion-Tokens und, falls vorhanden, den Reasoning-Anteil daran. */
+function completionCell(c) {
+  const reasoning = c.tokenCheck?.reasoningTokens;
+  if (!Number.isFinite(reasoning)) return num(c.completion_tokens);
+  return `${num(c.completion_tokens)} (davon ${num(reasoning)} Reasoning)`;
+}
+
 function renderCallDetail(c) {
   const box = el('div');
   const req = c.request || {};
@@ -376,11 +383,35 @@ function renderCallDetail(c) {
       el('dt', {}, 'response_format'), el('dd', { className: 'mono' }, req.response_format?.type || '–')),
     el('dl', { className: 'deflist' },
       el('dt', {}, 'Prompt-Tokens'), el('dd', {}, num(c.prompt_tokens)),
-      el('dt', {}, 'Completion-Tokens'), el('dd', {}, num(c.completion_tokens)),
+      el('dt', {}, 'Completion-Tokens'), el('dd', {}, completionCell(c)),
       el('dt', {}, 'Total'), el('dd', {}, num(c.total_tokens)),
       el('dt', {}, 'finish_reason'), el('dd', { className: 'mono' }, c.finish_reason || '–'))));
 
   if (c.error) box.append(el('h3', {}, 'Fehler'), el('div', { className: 'warn-box' }, c.error));
+
+  // Gemeldete Completion-Tokens gegen die Laenge der Antwort: weicht das um mehr als das
+  // Doppelte ab und liefert der Anbieter kein reasoning_tokens mit, stimmt entweder die
+  // Zaehlung nicht oder es laeuft verstecktes Reasoning mit.
+  const tc = c.tokenCheck;
+  if (tc?.suspicious) {
+    box.append(el('div', { className: 'warn-box' },
+      `Gemeldet werden ${num(tc.reported)} Completion-Tokens, die Antwort ist aber nur rund `
+      + `${num(tc.estimate)} Tokens lang (Faktor ${tc.ratio}). Der Anbieter liefert kein `
+      + 'reasoning_tokens mit - entweder laeuft verstecktes Reasoning oder die Zaehlung stimmt nicht.'));
+  }
+
+  // Antwort-Header: bei einem Proxy die interessanteste Spur zur Herkunft
+  if (c.headers) {
+    const rows = Object.entries(c.headers);
+    box.append(el('h3', {}, `Antwort-Header (${rows.length})`),
+      el('dl', { className: 'deflist' },
+        ...rows.flatMap(([k, v]) => [el('dt', { className: 'mono' }, k), el('dd', { className: 'mono' }, v)])));
+  }
+
+  if (c.usage) {
+    box.append(el('h3', {}, 'usage (vollstaendig, wie vom Anbieter geliefert)'),
+      el('pre', { className: 'pre' }, JSON.stringify(c.usage, null, 2)));
+  }
 
   // Was rausgegangen ist: System-Prompt und Konversation getrennt, das ist der Punkt der Ansicht
   const system = messages.find((m) => m.role === 'system');

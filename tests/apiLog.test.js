@@ -9,7 +9,7 @@ process.env.DB_PATH = TEST_DB_PATH;
 process.env.API_LOG_MAX_ROWS = '5';
 process.env.MESSAGE_LOG_MAX_ROWS = '4';
 
-const { recordApiCall, getApiCalls, getApiCall, getAllApiCalls, getTokenStats, clearApiLog } =
+const { recordApiCall, getApiCalls, getApiCall, getAllApiCalls, getTokenStats, clearApiLog, assessTokenPlausibility } =
   await import('../src/apiLog.js');
 const { recordMessage, setBotReply, getRecentMessages, getAllMessages, clearMessageLog } =
   await import('../src/messageLog.js');
@@ -138,4 +138,45 @@ test('das Nachrichten-Log ist ebenfalls ein Ringpuffer', () => {
   for (let i = 0; i < 10; i++) recordMessage({ authorId: 'u', content: `nr ${i}` });
   assert.equal(getRecentMessages({ limit: 50 }).total, 4, 'MESSAGE_LOG_MAX_ROWS=4 im Test');
   assert.equal(getAllMessages()[0].content, 'nr 9');
+});
+
+test('recordApiCall haelt die Antwort-Header fest', () => {
+  clearApiLog();
+  recordApiCall(call({ responseHeaders: { server: 'cloudflare', 'x-request-id': 'abc123', via: '1.1 proxy' } }));
+
+  const row = getApiCall(getApiCalls().rows[0].id);
+  const headers = JSON.parse(row.response_headers);
+  assert.equal(headers.server, 'cloudflare');
+  assert.equal(headers.via, '1.1 proxy');
+});
+
+test('assessTokenPlausibility schlaegt an, wenn viel mehr Tokens gemeldet werden als Text da ist', () => {
+  // Anlass: 412 gemeldete Completion-Tokens fuer eine Antwort von grob 65 Tokens.
+  const check = assessTokenPlausibility({ completion_tokens: 412, content: 'x'.repeat(260), usage_json: null });
+  assert.equal(check.reported, 412);
+  assert.equal(check.estimate, 65);
+  assert.ok(check.ratio >= 6);
+  assert.equal(check.suspicious, true);
+});
+
+test('assessTokenPlausibility schweigt, wenn der Anbieter Reasoning-Tokens ausweist', () => {
+  // Dann ist die Differenz erklaert und kein Hinweis noetig.
+  const check = assessTokenPlausibility({
+    completion_tokens: 412,
+    content: 'x'.repeat(260),
+    usage_json: JSON.stringify({ completion_tokens_details: { reasoning_tokens: 350 } })
+  });
+  assert.equal(check.reasoningTokens, 350);
+  assert.equal(check.suspicious, false);
+});
+
+test('assessTokenPlausibility schweigt bei plausiblen Zahlen', () => {
+  const check = assessTokenPlausibility({ completion_tokens: 70, content: 'x'.repeat(260), usage_json: null });
+  assert.equal(check.suspicious, false);
+});
+
+test('assessTokenPlausibility gibt null zurueck, wenn die Grundlage fehlt', () => {
+  assert.equal(assessTokenPlausibility({ completion_tokens: null, content: 'abc' }), null);
+  assert.equal(assessTokenPlausibility({ completion_tokens: 10, content: null }), null);
+  assert.equal(assessTokenPlausibility(null), null);
 });

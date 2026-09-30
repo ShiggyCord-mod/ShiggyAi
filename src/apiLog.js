@@ -28,15 +28,23 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_api_calls_kind ON api_calls (kind);
 `);
 
+// Nachtraeglich ergaenzt: bei einem Proxy-Endpoint sind die Antwort-Header die einzige Spur,
+// aus der sich ablesen laesst, was zwischen dem Bot und dem eigentlichen Modell sitzt.
+// ALTER TABLE, weil die Tabelle in bestehenden Installationen schon existiert.
+const columns = db.prepare('PRAGMA table_info(api_calls)').all().map((c) => c.name);
+if (!columns.includes('response_headers')) {
+  db.exec('ALTER TABLE api_calls ADD COLUMN response_headers TEXT');
+}
+
 const insertStmt = db.prepare(`
   INSERT INTO api_calls (
     kind, model, structured_mode, status, ok, latency_ms,
     prompt_tokens, completion_tokens, total_tokens, usage_json,
-    request_json, response_text, content, finish_reason, error
+    request_json, response_text, content, finish_reason, error, response_headers
   ) VALUES (
     @kind, @model, @structuredMode, @status, @ok, @latencyMs,
     @promptTokens, @completionTokens, @totalTokens, @usageJson,
-    @requestJson, @responseText, @content, @finishReason, @error
+    @requestJson, @responseText, @content, @finishReason, @error, @responseHeaders
   )
 `);
 
@@ -86,7 +94,8 @@ export function recordApiCall(entry) {
     responseText: entry.responseText ?? null,
     content: entry.content ?? null,
     finishReason: entry.finishReason ?? null,
-    error: entry.error ?? null
+    error: entry.error ?? null,
+    responseHeaders: entry.responseHeaders ? JSON.stringify(entry.responseHeaders) : null
   });
 
   const { count } = countStmt.get();
@@ -169,4 +178,44 @@ export function getTokenStats() {
 
 export function clearApiLog() {
   return db.prepare('DELETE FROM api_calls').run().changes;
+}
+
+/**
+ * Grobe Plausibilitaetspruefung der gemeldeten Completion-Tokens gegen die Laenge der Antwort.
+ *
+ * Anlass: ein Call meldete 412 completion_tokens fuer eine Antwort von grob 65 Tokens. Dafuer
+ * gibt es zwei Erklaerungen - verstecktes Reasoning, das nicht mitgeliefert wird, oder eine
+ * Zaehlung, die nicht stimmt. Beides will man wissen, wenn man nach Tokens bezahlt. Die
+ * Schaetzung ist absichtlich grob (rund 4 Zeichen pro Token) und taugt nur dazu, eine
+ * Groessenordnung auseinanderzuhalten, nicht zum Nachrechnen auf den Token.
+ */
+export function assessTokenPlausibility(row) {
+  const reported = row?.completion_tokens;
+  if (!Number.isFinite(reported) || !row?.content) return null;
+
+  const estimate = Math.max(1, Math.round(row.content.length / 4));
+  const ratio = reported / estimate;
+  const usage = safeParse(row.usage_json);
+  const reasoning =
+    usage?.completion_tokens_details?.reasoning_tokens ??
+    usage?.output_tokens_details?.reasoning_tokens ??
+    null;
+
+  return {
+    reported,
+    estimate,
+    ratio: Number(ratio.toFixed(2)),
+    reasoningTokens: reasoning,
+    // Ab Faktor 2 lohnt das Hinsehen; ein mitgeliefertes reasoning_tokens erklaert es bereits.
+    suspicious: ratio >= 2 && !reasoning
+  };
+}
+
+function safeParse(text) {
+  if (typeof text !== 'string') return null;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
 }

@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/index.js",
     "deploy-commands": "node src/deploy-commands.js",
-    "test": "node --test"
+    "test": "node --test",
+    "memories:clean": "node scripts/clean-memories.js"
   },
   "dependencies": {
     "discord.js": "^14.16.3",

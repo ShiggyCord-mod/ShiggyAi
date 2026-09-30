@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
+import { MAX_MEMORY_LENGTH, findDuplicate } from './memoryHygiene.js';
 
 const DB_PATH = process.env.DB_PATH || './data/memory.sqlite';
 
@@ -100,10 +101,25 @@ const MAX_MEMORIES_PER_SCOPE = 50;
 
 /**
  * Fakt ueber einen Discord-User - gilt serveruebergreifend (DM, jeder Server gleich).
+ *
+ * Die Laengengrenze wird hier erzwungen, nicht nur in llm.js: ueber /memory admin add-user und
+ * aus Altdaten kamen sonst beliebig lange Inhalte in die Tabelle (gemessen einer mit 3276
+ * Zeichen), und genau daran sind die Ausgabepfade zerbrochen.
+ *
+ * dedupe=false nur fuer manuelle Eintraege: da hat ein Mensch bewusst entschieden. Automatische
+ * Eintraege vom Modell werden gegen den Bestand geprueft, weil das Modell dieselbe Aussage
+ * sonst in Varianten immer wieder schreibt.
+ *
+ * @returns {{stored: boolean, reason?: 'empty'|'duplicate', duplicateOf?: number}}
  */
-export function addUserMemory(userId, content) {
-  const trimmed = content.trim();
-  if (!trimmed) return;
+export function addUserMemory(userId, content, { dedupe = true } = {}) {
+  const trimmed = String(content ?? '').trim().slice(0, MAX_MEMORY_LENGTH);
+  if (!trimmed) return { stored: false, reason: 'empty' };
+
+  if (dedupe) {
+    const hit = findDuplicate(trimmed, listUserStmt.all(userId, MAX_MEMORIES_PER_SCOPE));
+    if (hit) return { stored: false, reason: 'duplicate', duplicateOf: hit.id };
+  }
 
   insertUserStmt.run(userId, trimmed);
 
@@ -111,14 +127,22 @@ export function addUserMemory(userId, content) {
   if (count > MAX_MEMORIES_PER_SCOPE) {
     trimOldestUserStmt.run(userId, count - MAX_MEMORIES_PER_SCOPE);
   }
+  return { stored: true };
 }
 
 /**
  * Fakt ueber einen Server - gilt fuer alle dortigen User, aber nicht serveruebergreifend.
+ * Laengengrenze und Dublettenpruefung wie bei addUserMemory.
+ * @returns {{stored: boolean, reason?: 'empty'|'duplicate', duplicateOf?: number}}
  */
-export function addGuildMemory(guildId, content) {
-  const trimmed = content.trim();
-  if (!trimmed) return;
+export function addGuildMemory(guildId, content, { dedupe = true } = {}) {
+  const trimmed = String(content ?? '').trim().slice(0, MAX_MEMORY_LENGTH);
+  if (!trimmed) return { stored: false, reason: 'empty' };
+
+  if (dedupe) {
+    const hit = findDuplicate(trimmed, listGuildStmt.all(guildId, MAX_MEMORIES_PER_SCOPE));
+    if (hit) return { stored: false, reason: 'duplicate', duplicateOf: hit.id };
+  }
 
   insertGuildStmt.run(guildId, trimmed);
 
@@ -126,6 +150,7 @@ export function addGuildMemory(guildId, content) {
   if (count > MAX_MEMORIES_PER_SCOPE) {
     trimOldestGuildStmt.run(guildId, count - MAX_MEMORIES_PER_SCOPE);
   }
+  return { stored: true };
 }
 
 export function getUserMemories(userId, limit = 20) {

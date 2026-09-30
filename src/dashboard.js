@@ -12,7 +12,7 @@ import {
   addUserMemory,
   addGuildMemory
 } from './db.js';
-import { getApiCalls, getApiCall, getAllApiCalls, getTokenStats, clearApiLog } from './apiLog.js';
+import { getApiCalls, getApiCall, getAllApiCalls, getTokenStats, clearApiLog, assessTokenPlausibility } from './apiLog.js';
 import { getRecentMessages, getAllMessages, clearMessageLog } from './messageLog.js';
 
 const PORT = parseInt(process.env.DASHBOARD_PORT || '1267', 10);
@@ -150,7 +150,9 @@ async function route(req, res, ctx) {
       ...row,
       request: tryParse(row.request_json),
       response: tryParse(row.response_text),
-      usage: tryParse(row.usage_json)
+      usage: tryParse(row.usage_json),
+      headers: tryParse(row.response_headers),
+      tokenCheck: assessTokenPlausibility(row)
     });
   }
 
@@ -273,6 +275,8 @@ function buildCallExport() {
         completion: row.completion_tokens,
         total: row.total_tokens
       },
+      token_check: assessTokenPlausibility(row),
+      response_headers: tryParse(row.response_headers),
       request: tryParse(row.request_json),
       response: tryParse(row.response_text),
       content: row.content
