@@ -1,6 +1,12 @@
 import 'dotenv/config';
 import { Client, GatewayIntentBits, MessageFlags, Partials } from 'discord.js';
-import { askGemini, extractMemories, GeminiRateLimitError, GENERIC_FALLBACK_REPLY } from './gemini.js';
+import {
+  askLlm,
+  extractMemories,
+  LlmRateLimitError,
+  LlmBillingError,
+  GENERIC_FALLBACK_REPLY
+} from './llm.js';
 import {
   addUserMemory,
   addGuildMemory,
@@ -27,10 +33,11 @@ const TRUSTED_USER_IDS = new Set(
 );
 const SHORT_TERM_CONTEXT_LIMIT = parseInt(process.env.SHORT_TERM_CONTEXT_LIMIT || '15', 10);
 
-// Clientseitiges Limit, wieviele Gemini-Requests pro Minute rausgehen duerfen.
-// Der Gemini Free Tier liegt je nach Modell aktuell bei ca. 10-15 RPM (Flash-Modelle),
-// live einsehbar unter https://aistudio.google.com/rate-limit fuer dein Projekt.
-// Bewusst etwas konservativer als das echte Limit, damit Puffer fuer Retries bleibt.
+// Clientseitiges Limit, wieviele Requests pro Minute an die LLM-API rausgehen duerfen.
+// Das echte Limit haengt vom Anbieter und vom gebuchten Tarif ab (bei CodeCraft laut Doku
+// "per-minute limits vary by plan tier", ohne konkrete Zahl) - der Default hier ist also
+// eine konservative Schaetzung und gehoert angepasst, sobald das echte Limit bekannt ist.
+// Bewusst konservativ, damit Puffer fuer Retries bleibt.
 // Wird von der Live-Antwort UND dem passiven Lernen (unten) gemeinsam genutzt.
 const RATE_LIMIT_RPM = parseInt(process.env.RATE_LIMIT_RPM || '10', 10);
 const rateLimiter = new RateLimiter(RATE_LIMIT_RPM);
@@ -41,8 +48,8 @@ const QUEUE_WARNING_THRESHOLD_MS = 5_000;
 
 // ---- Passives Lernen: liest auch Nachrichten mit, die nicht an den Bot gerichtet sind ----
 // Bewusst gebatcht statt pro Nachricht, sonst sprengt das sehr schnell RATE_LIMIT_RPM
-// und die Kosten (ein Gemini-Call pro Channel-Nachricht waere zu viel). Standardmaessig aus,
-// da es sich das Gemini-Budget mit Live-Antworten teilt und die dadurch unerwartet ausbremsen kann.
+// und die Kosten (ein Modell-Call pro Channel-Nachricht waere zu viel). Achtung: standardmaessig AN,
+// und es teilt sich das Token-/Rate-Budget mit den Live-Antworten, kann die also ausbremsen.
 const LEARNING_ENABLED = (process.env.LEARNING_ENABLED ?? 'true') !== 'false';
 const LEARNING_BATCH_SIZE = parseInt(process.env.LEARNING_BATCH_SIZE || '20', 10);
 const LEARNING_SWEEP_INTERVAL_MINUTES = parseInt(process.env.LEARNING_SWEEP_INTERVAL_MINUTES || '10', 10);
@@ -130,7 +137,7 @@ client.on('messageCreate', async (message) => {
     const userMemories = getUserMemories(message.author.id);
     const serverMemories = getGuildMemories(message.guild.id);
 
-    const { reply, newUserMemories, newServerMemories } = await askGemini({
+    const { reply, newUserMemories, newServerMemories } = await askLlm({
       persona: BOT_PERSONA,
       shortTermMessages,
       userMemories,
@@ -152,9 +159,15 @@ client.on('messageCreate', async (message) => {
       await sendChunked(message, reply);
     }
   } catch (err) {
-    if (err instanceof GeminiRateLimitError) {
-      console.warn('Gemini Rate Limit erreicht:', err.message);
+    if (err instanceof LlmRateLimitError) {
+      console.warn('Rate Limit der LLM-API erreicht:', err.message);
       await message.reply(statusEmbed(formatRateLimitMessage(err)));
+      return;
+    }
+
+    if (err instanceof LlmBillingError) {
+      console.error('LLM-API verlangt Billing (402):', err.message);
+      await message.reply(statusEmbed(BILLING_MESSAGE));
       return;
     }
 
@@ -194,7 +207,7 @@ function bufferForPassiveLearning(message) {
 }
 
 /**
- * Schickt den gesammelten Batch eines Channels an Gemini zur Fakten-Extraktion
+ * Schickt den gesammelten Batch eines Channels an die LLM-API zur Fakten-Extraktion
  * und speichert die gefundenen User- und Server-Memories. Teilt sich den Rate
  * Limiter mit der Live-Antwort, damit das Gesamtbudget nicht ueberschritten wird.
  */
@@ -408,7 +421,7 @@ async function handleAskCommand(interaction) {
     const userMemories = getUserMemories(userId);
     const serverMemories = guildId ? getGuildMemories(guildId) : [];
 
-    const { reply, newUserMemories, newServerMemories } = await askGemini({
+    const { reply, newUserMemories, newServerMemories } = await askLlm({
       persona: BOT_PERSONA,
       shortTermMessages: [],
       userMemories,
@@ -432,9 +445,15 @@ async function handleAskCommand(interaction) {
       await sendChunkedReply(interaction, reply);
     }
   } catch (err) {
-    if (err instanceof GeminiRateLimitError) {
-      console.warn('Gemini Rate Limit erreicht:', err.message);
+    if (err instanceof LlmRateLimitError) {
+      console.warn('Rate Limit der LLM-API erreicht:', err.message);
       await interaction.editReply(statusEmbed(formatRateLimitMessage(err)));
+      return;
+    }
+
+    if (err instanceof LlmBillingError) {
+      console.error('LLM-API verlangt Billing (402):', err.message);
+      await interaction.editReply(statusEmbed(BILLING_MESSAGE));
       return;
     }
 
@@ -443,26 +462,31 @@ async function handleAskCommand(interaction) {
   }
 }
 
+// Bewusst ohne Retry-Hinweis: ein 402 loest sich nicht durch Warten, sondern nur im Dashboard.
+const BILLING_MESSAGE =
+  "My API account can't run requests right now - the provider says payment is required (HTTP 402), " +
+  'so the quota is used up or the model needs a paid plan. Only the bot owner can fix that, in the ' +
+  "provider's billing settings.";
+
 /**
- * Baut eine ehrliche Rate-Limit-Nachricht. Bei Tageslimit ist Googles mitgelieferter
- * retryDelay (oft nur ein paar Sekunden) irrefuehrend - das Kontingent ist trotzdem erst
- * am naechsten Tag wieder da, egal wie kurz man wartet.
+ * Baut eine ehrliche Rate-Limit-Nachricht. Bei einem Tageskontingent waere ein kurzer
+ * Retry-Hinweis irrefuehrend - das Kontingent ist erst wieder da, wenn das Tagesfenster
+ * rollt, egal wie kurz man wartet.
  */
 function formatRateLimitMessage(err) {
   if (err.isDailyQuota) {
-    const limitHint = err.dailyQuotaLimit ? ` (currently ${err.dailyQuotaLimit} requests/day on the free tier for this model)` : '';
+    const limitHint = err.dailyQuotaLimit ? ` (currently ${err.dailyQuotaLimit} requests/day on this tier)` : '';
     return (
-      `Gemini's daily quota is used up for today${limitHint}. ` +
-      "It only resets once Google's day rolls over (midnight Pacific Time) - " +
-      'waiting a bit and trying again will not help. Check the live status at ' +
-      'https://aistudio.google.com/rate-limit, or switch GEMINI_MODEL, or upgrade to a paid tier.'
+      `My daily quota is used up${limitHint}. ` +
+      'It only comes back when the daily window rolls over - waiting a bit and trying again will not help. ' +
+      'The bot owner can switch LLM_MODEL or upgrade the plan.'
     );
   }
 
   const waitHint = err.retryAfterSeconds
-    ? ` Google says it should work again in about ${err.retryAfterSeconds}s.`
+    ? ` It should work again in about ${err.retryAfterSeconds}s.`
     : ' Try again in a minute or two.';
-  return `Gemini is busy right now (rate limit reached).${waitHint}`;
+  return `The model API is busy right now (rate limit reached).${waitHint}`;
 }
 
 /**

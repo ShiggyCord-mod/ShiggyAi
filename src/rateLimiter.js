@@ -4,7 +4,7 @@
  * innerhalb der letzten 60 Sekunden erreicht ist, bis wieder Platz ist.
  *
  * Das ist bewusst clientseitig und pessimistisch: lieber der Bot wartet
- * intern kurz, als dass er staendig 429 von Gemini kassiert.
+ * intern kurz, als dass er staendig 429 von der LLM-API kassiert.
  */
 export class RateLimiter {
   constructor(maxPerMinute) {

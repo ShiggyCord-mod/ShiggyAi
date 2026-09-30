@@ -1,7 +1,7 @@
 {
-  "name": "discord-gemini-bot",
+  "name": "discord-llm-bot",
   "version": "1.0.0",
-  "description": "Discord Bot mit Kurz- und Langzeitgedaechtnis, Antworten via Google Gemini API",
+  "description": "Discord Bot mit Kurz- und Langzeitgedaechtnis, Antworten via OpenAI-kompatible LLM-API (Default: CodeCraft)",
   "type": "module",
   "main": "src/index.js",
   "scripts": {
