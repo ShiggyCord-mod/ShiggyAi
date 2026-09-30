@@ -84,19 +84,59 @@ Der Bot entscheidet selbst, was merkenswert ist - es gibt keinen manuellen
 Pro User und pro Server gilt ein Deckel von 50 Erinnerungen (`MAX_MEMORIES_PER_SCOPE` in
 `src/db.js`), aeltere fliegen automatisch raus.
 
+## Dashboard
+
+Beim Start laeuft eine Weboberflaeche auf **http://127.0.0.1:1267** (`DASHBOARD_PORT`):
+
+- **Uebersicht** - Verbindungsstatus, Gateway-Ping, Laufzeit, Serverliste, aktives Modell und
+  Endpoint, Structured-Output-Modus, Rate-Limit-Rest, Stand der Lernpuffer, Persona.
+- **Nachrichten** - die letzten gesehenen Nachrichten mit der jeweiligen Antwort des Bots,
+  getrennt nach "angesprochen" und "passiv mitgelesen", filterbar nach Server.
+- **Erinnerungen** - Manager ueber beide Arten (User und Server) in einer Liste: nach Besitzer
+  und Inhalt filtern, einzeln loeschen, manuell anlegen. Zeigt auch, wer den Deckel erreicht hat.
+- **Verlauf** - jeder Request an die API zum Aufklappen: der rausgegangene System-Prompt und die
+  Konversation, die reingekommene Antwort, Tokenzahlen, Laufzeit, `finish_reason` und der
+  vollstaendige Request/Response als JSON. Fehlversuche stehen mit drin, damit die Abrechnung
+  stimmt.
+- **Tokens** - Aufschluesselung nach Prompt/Completion, nach Art (`reply` vs. `extract`), nach
+  Modell und nach Tag.
+
+**Export** (oben rechts): Erinnerungen, Verlauf oder alles als JSON. Der Verlauf-Export traegt
+pro Eintrag Request **und** Antwort samt Tokenzahlen - genug, um den Verbrauch nachzurechnen.
+
+### Zugriff und Daten
+
+Das Dashboard hat **bewusst keine Authentifizierung** und bindet deshalb standardmaessig nur auf
+`127.0.0.1`. Es zeigt komplette Chatverlaeufe, System-Prompts und persoenliche Fakten ueber
+Dritte. Fuer Zugriff von aussen `DASHBOARD_HOST=0.0.0.0` setzen **und** selbst etwas davorstellen
+(Reverse Proxy mit Auth, SSH-Tunnel, VPN). Der API-Key wird nie ausgeliefert, nur maskiert
+(`cc_ab...xyz`), und steht in keinem Export.
+
+Beide Logs sind Ringpuffer (`API_LOG_MAX_ROWS`, `MESSAGE_LOG_MAX_ROWS`) und lassen sich in der
+Oberflaeche leeren. Discord bleibt die Quelle der Wahrheit fuer den Chatverlauf - das
+Nachrichten-Log ist eine Ansicht der letzten Aktivitaet, kein Archiv.
+
 ## Aufbau
 
 ```
 src/
   index.js           Bot-Client, Message-Handler, Slash-Command-Handler, passives Lernen
   llm.js             Call an die OpenAI-kompatible API inkl. strukturiertem JSON-Response
-  db.js              SQLite Layer fuer das Langzeitgedaechtnis
+  db.js              SQLite Layer fuer das Langzeitgedaechtnis + Dashboard-Queries
+  apiLog.js          Ringpuffer aller API-Calls (Request, Antwort, Tokens, Laufzeit)
+  messageLog.js      Ringpuffer der zuletzt gesehenen Nachrichten
+  dashboard.js       HTTP-Server (node:http) fuer Oberflaeche und JSON-API
   commands.js        Definition der Slash-Commands
   deploy-commands.js Registriert die Slash-Commands bei Discord
   pagination.js      Components-V2-Seiten + Blaetter-Buttons fuer die Admin-Listen
   rateLimiter.js     Clientseitiges Sliding-Window-Limit
   statusEmbed.js     Rote Embeds fuer System-/Statusmeldungen
   textChunking.js    Laengenlimits: Aufteilen und Kuerzen fuer Discord
+public/
+  index.html         Dashboard-Oberflaeche
+  app.css            Farbrollen als Tokens, Light + Dark eigens gesetzt
+  app.js             Ansichten, Filter, Export
+  chart.js           Gestapeltes Balkendiagramm (DOM injizierbar, damit testbar)
 data/
   memory.sqlite      wird automatisch angelegt
 ```
@@ -151,6 +191,8 @@ Drei Faelle sind abgedeckt:
   sind die aelteren fuer den User selbst also nicht einsehbar oder loeschbar.
 - Die vom Modell beim passiven Lernen gelieferte User-ID wird noch nicht gegen die
   tatsaechlichen Autoren des Batches geprueft.
+- Das Dashboard hat keine Authentifizierung und ist deshalb auf localhost beschraenkt.
+- Erinnerungen haengen an IDs, nicht an Namen - der Manager listet Besitzer also per ID.
 
 ## Datenschutz
 
@@ -158,3 +200,7 @@ Der Bot schickt Channel-Inhalte und gespeicherte Fakten ueber namentlich bekannt
 an den konfigurierten API-Anbieter - beim passiven Lernen auch von Leuten, die den Bot nie
 angesprochen haben. Wer das nicht will, setzt `LEARNING_ENABLED=false`; die Wahl des
 Anbieters ueber `LLM_BASE_URL` bestimmt, wem diese Daten anvertraut werden.
+
+Dieselben Daten liegen lokal in der SQLite-Datei und sind im Dashboard einsehbar: das
+Nachrichten-Log haelt Inhalte mit, das API-Log die vollstaendigen Prompts. Wer das nicht will,
+setzt die Ringpuffer klein oder leert die Logs in der Oberflaeche.

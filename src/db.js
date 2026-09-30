@@ -63,6 +63,13 @@ if (!hasScopeColumn) {
   `);
 }
 
+// Die Dashboard-Ansichten filtern und gruppieren nach scope + Besitzer, nicht nur punktuell
+// nach einer ID - deshalb hier Indizes statt Table-Scans.
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_memories_user ON memories (scope, user_id);
+  CREATE INDEX IF NOT EXISTS idx_memories_guild ON memories (scope, guild_id);
+`);
+
 const insertUserStmt = db.prepare("INSERT INTO memories (scope, user_id, content) VALUES ('user', ?, ?)");
 const insertGuildStmt = db.prepare("INSERT INTO memories (scope, guild_id, content) VALUES ('guild', ?, ?)");
 const listUserStmt = db.prepare(
@@ -150,4 +157,105 @@ export function deleteGuildMemory(id, guildId) {
 export function clearUserMemories(userId) {
   const result = clearUserStmt.run(userId);
   return result.changes;
+}
+
+// ---- Ansichten fuer das Dashboard ----
+// Bewusst scope-uebergreifend und mit Besitzer-Spalten: der Erinnerungsmanager zeigt User- und
+// Server-Erinnerungen in einer Liste, die Slash-Commands oben bleiben absichtlich pro Scope.
+
+const searchStmt = db.prepare(`
+  SELECT id, scope, user_id, guild_id, content, created_at, LENGTH(content) AS length
+  FROM memories
+  WHERE (@scope IS NULL OR scope = @scope)
+    AND (@ownerId IS NULL OR user_id = @ownerId OR guild_id = @ownerId)
+    AND (@q IS NULL OR content LIKE '%' || @q || '%')
+  ORDER BY id DESC
+  LIMIT @limit OFFSET @offset
+`);
+
+const searchCountStmt = db.prepare(`
+  SELECT COUNT(*) AS count FROM memories
+  WHERE (@scope IS NULL OR scope = @scope)
+    AND (@ownerId IS NULL OR user_id = @ownerId OR guild_id = @ownerId)
+    AND (@q IS NULL OR content LIKE '%' || @q || '%')
+`);
+
+/** Gefilterte, blaetterbare Liste ueber beide Scopes. */
+export function searchMemories({ scope = null, ownerId = null, q = null, limit = 50, offset = 0 } = {}) {
+  const params = { scope, ownerId, q: q || null, limit, offset };
+  return {
+    total: searchCountStmt.get(params).count,
+    rows: searchStmt.all(params)
+  };
+}
+
+/** Alle Erinnerungen fuer den JSON-Export. */
+export function getAllMemories() {
+  return db
+    .prepare('SELECT id, scope, user_id, guild_id, content, created_at FROM memories ORDER BY id DESC')
+    .all();
+}
+
+export function getMemoryById(id) {
+  return db.prepare('SELECT id, scope, user_id, guild_id, content, created_at FROM memories WHERE id = ?').get(id) ?? null;
+}
+
+/** Loeschen per ID ohne Scope-Angabe - fuer den Manager, der beide Arten in einer Liste zeigt. */
+export function deleteMemoryById(id) {
+  return db.prepare('DELETE FROM memories WHERE id = ?').run(id).changes > 0;
+}
+
+/**
+ * Wer hat wieviele Erinnerungen. Zwei Listen, weil ein Eintrag entweder an einer User-ID
+ * oder an einer Guild-ID haengt, nie an beiden.
+ */
+export function getMemoryOwners() {
+  const users = db
+    .prepare(
+      `SELECT user_id AS id, COUNT(*) AS count, MAX(created_at) AS last_at
+       FROM memories WHERE scope = 'user' AND user_id IS NOT NULL
+       GROUP BY user_id ORDER BY count DESC`
+    )
+    .all();
+
+  const guilds = db
+    .prepare(
+      `SELECT guild_id AS id, COUNT(*) AS count, MAX(created_at) AS last_at
+       FROM memories WHERE scope = 'guild' AND guild_id IS NOT NULL
+       GROUP BY guild_id ORDER BY count DESC`
+    )
+    .all();
+
+  return { users, guilds };
+}
+
+export function getMemoryStats() {
+  const byScope = db.prepare('SELECT scope, COUNT(*) AS count FROM memories GROUP BY scope').all();
+  const totals = db
+    .prepare(
+      `SELECT COUNT(*) AS total,
+              COUNT(DISTINCT CASE WHEN scope = 'user' THEN user_id END) AS distinct_users,
+              COUNT(DISTINCT CASE WHEN scope = 'guild' THEN guild_id END) AS distinct_guilds,
+              MAX(LENGTH(content)) AS longest,
+              CAST(AVG(LENGTH(content)) AS INTEGER) AS avg_length,
+              MAX(created_at) AS newest_at
+       FROM memories`
+    )
+    .get();
+
+  // Der Deckel gilt pro Scope-Besitzer; wer ihn erreicht hat, verliert bei jedem neuen Fakt
+  // den aeltesten - im Dashboard sichtbar zu machen ist der halbe Sinn der Uebung.
+  const atCap = db
+    .prepare(
+      `SELECT owner, scope, count FROM (
+         SELECT user_id AS owner, 'user' AS scope, COUNT(*) AS count FROM memories
+           WHERE scope = 'user' GROUP BY user_id
+         UNION ALL
+         SELECT guild_id AS owner, 'guild' AS scope, COUNT(*) AS count FROM memories
+           WHERE scope = 'guild' GROUP BY guild_id
+       ) WHERE count >= ? ORDER BY count DESC`
+    )
+    .all(MAX_MEMORIES_PER_SCOPE);
+
+  return { totals, byScope, atCap, cap: MAX_MEMORIES_PER_SCOPE };
 }

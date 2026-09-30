@@ -3,6 +3,8 @@ import { Client, GatewayIntentBits, MessageFlags, Partials } from 'discord.js';
 import {
   askLlm,
   extractMemories,
+  setCallRecorder,
+  getStructuredOutputMode,
   LlmRateLimitError,
   LlmBillingError,
   GENERIC_FALLBACK_REPLY
@@ -21,6 +23,9 @@ import { RateLimiter } from './rateLimiter.js';
 import { buildMemoryPage, parseMemoryButtonId, renderMemoryLines } from './pagination.js';
 import { chunkText } from './textChunking.js';
 import { statusEmbed, EMBED_DESCRIPTION_LIMIT } from './statusEmbed.js';
+import { recordApiCall } from './apiLog.js';
+import { recordMessage, setBotReply } from './messageLog.js';
+import { startDashboard } from './dashboard.js';
 
 const BOT_PERSONA = process.env.BOT_PERSONA || 'Du bist ein hilfreicher Discord-Bot.';
 
@@ -65,6 +70,10 @@ const MAX_LEARNING_CHANNELS = 200;
 // channelId -> { guildId, messages: [{authorId, authorName, content}] }
 const learningBuffers = new Map();
 
+// Jeden Request an die LLM-API mitschreiben (Prompt, Antwort, Tokens, Laufzeit) - das ist die
+// Datenbasis fuer den Verlauf und die Token-Aufschluesselung im Dashboard.
+setCallRecorder(recordApiCall);
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -77,6 +86,18 @@ const client = new Client({
 // 'ready' ist ab discord.js v14.22 deprecated (heisst in v15 nur noch 'clientReady').
 client.once('clientReady', () => {
   console.log(`Eingeloggt als ${client.user.tag}`);
+
+  startDashboard({
+    client,
+    // Live-Werte, die nur hier bekannt sind - das Dashboard soll nicht in die Interna greifen.
+    runtime: () => ({
+      rateLimitRemaining: rateLimiter.remaining(),
+      learningEnabled: LEARNING_ENABLED,
+      bufferedChannels: learningBuffers.size,
+      bufferedMessages: [...learningBuffers.values()].reduce((sum, e) => sum + e.messages.length, 0),
+      structuredOutputMode: getStructuredOutputMode()
+    })
+  });
 });
 
 // ---- Nachrichten-Handler: antwortet nur bei Mention/Reply, sammelt sonst fuers passive Lernen ----
@@ -97,9 +118,13 @@ client.on('messageCreate', async (message) => {
   }
 
   if (!isMentioned && !isReplyToBot) {
+    logMessage(message, false);
     if (LEARNING_ENABLED) bufferForPassiveLearning(message);
     return;
   }
+
+  // Vor dem API-Call festhalten, damit die Nachricht auch im Log steht, wenn der Call scheitert.
+  const logId = logMessage(message, true);
 
   await message.channel.sendTyping();
 
@@ -153,12 +178,16 @@ client.on('messageCreate', async (message) => {
       addGuildMemory(message.guild.id, mem);
     }
 
+    setBotReply(logId, reply);
+
     if (reply === GENERIC_FALLBACK_REPLY) {
       await message.reply(statusEmbed(reply));
     } else {
       await sendChunked(message, reply);
     }
   } catch (err) {
+    setBotReply(logId, `[Fehler] ${err?.message ?? err}`);
+
     if (err instanceof LlmRateLimitError) {
       console.warn('Rate Limit der LLM-API erreicht:', err.message);
       await message.reply(statusEmbed(formatRateLimitMessage(err)));
@@ -175,6 +204,30 @@ client.on('messageCreate', async (message) => {
     await message.reply(statusEmbed('Oops, something went wrong while thinking. Check the logs.'));
   }
 });
+
+/**
+ * Haelt eine gesehene Nachricht fuer die Dashboard-Ansicht fest. Protokollieren darf den Bot
+ * nie umbringen, deshalb komplett in try/catch.
+ * @returns {number|null} die Log-ID, um spaeter die Antwort nachzutragen
+ */
+function logMessage(message, addressed) {
+  try {
+    return recordMessage({
+      guildId: message.guild?.id ?? null,
+      guildName: message.guild?.name ?? null,
+      channelId: message.channel?.id ?? null,
+      channelName: message.channel?.name ?? null,
+      authorId: message.author.id,
+      authorName: message.member?.displayName || message.author.username,
+      content: cleanContent(message, client.user.id),
+      source: 'message',
+      addressed
+    });
+  } catch (err) {
+    console.error('Konnte die Nachricht nicht protokollieren:', err);
+    return null;
+  }
+}
 
 /**
  * Sammelt eine nicht an den Bot gerichtete Nachricht fuer das spaetere gebatchte
@@ -415,6 +468,23 @@ async function handleAskCommand(interaction) {
 
   await interaction.deferReply();
 
+  let logId = null;
+  try {
+    logId = recordMessage({
+      guildId,
+      guildName: interaction.guild?.name ?? null,
+      channelId: interaction.channelId ?? null,
+      channelName: interaction.channel?.name ?? null,
+      authorId: userId,
+      authorName: userName,
+      content: question,
+      source: 'ask',
+      addressed: true
+    });
+  } catch (err) {
+    console.error('Konnte /ask nicht protokollieren:', err);
+  }
+
   try {
     await rateLimiter.acquire();
 
@@ -439,12 +509,16 @@ async function handleAskCommand(interaction) {
       }
     }
 
+    setBotReply(logId, reply);
+
     if (reply === GENERIC_FALLBACK_REPLY) {
       await interaction.editReply(statusEmbed(reply));
     } else {
       await sendChunkedReply(interaction, reply);
     }
   } catch (err) {
+    setBotReply(logId, `[Fehler] ${err?.message ?? err}`);
+
     if (err instanceof LlmRateLimitError) {
       console.warn('Rate Limit der LLM-API erreicht:', err.message);
       await interaction.editReply(statusEmbed(formatRateLimitMessage(err)));

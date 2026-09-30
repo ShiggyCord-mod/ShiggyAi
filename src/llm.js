@@ -45,6 +45,27 @@ export function getStructuredOutputMode() {
   return structuredOutputMode;
 }
 
+// Jeder HTTP-Versuch an die API wird hier gemeldet - auch der fehlgeschlagene erste Versuch
+// einer Herabstufung, damit die Token-Abrechnung im Dashboard ehrlich bleibt. Absichtlich ein
+// Hook statt eines direkten Imports der Log-Schicht: llm.js bleibt damit frei von
+// DB-Abhaengigkeiten und in Tests ohne Datenbank pruefbar.
+let callRecorder = null;
+
+/** @param {((entry: object) => void) | null} fn */
+export function setCallRecorder(fn) {
+  callRecorder = fn;
+}
+
+function record(entry) {
+  if (!callRecorder) return;
+  try {
+    callRecorder(entry);
+  } catch (err) {
+    // Protokollieren darf den Bot nie umbringen.
+    console.error('Konnte den API-Call nicht protokollieren:', err);
+  }
+}
+
 /**
  * Eigener Error-Typ fuer den Fall, dass die API selbst mit 429 antwortet (z.B. weil das
  * clientseitige Limit nicht zum echten Limit des Anbieters passt, oder ein Tageskontingent
@@ -204,7 +225,7 @@ function buildResponseFormat(mode, schemaName, responseSchema) {
  * LlmBillingError bei 402, sonst einen normalen Error bei anderen HTTP-Fehlern.
  * @returns {Promise<string>} der rohe Text der Antwort (noch nicht geparst)
  */
-async function callLlm({ systemInstruction, messages, schemaName, responseSchema, temperature, maxOutputTokens }) {
+async function callLlm({ kind, systemInstruction, messages, schemaName, responseSchema, temperature, maxOutputTokens }) {
   if (!LLM_API_KEY) {
     throw new Error('LLM_API_KEY ist nicht gesetzt (siehe .env.example).');
   }
@@ -212,7 +233,7 @@ async function callLlm({ systemInstruction, messages, schemaName, responseSchema
     throw new Error('LLM_MODEL ist nicht gesetzt - es gibt bewusst keinen Default, da die gueltigen Model-IDs vom Anbieter abhaengen (siehe .env.example).');
   }
 
-  const send = (mode) => {
+  const send = async (mode) => {
     const body = {
       model: LLM_MODEL,
       messages: [{ role: 'system', content: systemInstruction }, ...messages],
@@ -227,7 +248,8 @@ async function callLlm({ systemInstruction, messages, schemaName, responseSchema
       body.reasoning_effort = REASONING_EFFORT;
     }
 
-    return fetch(API_URL, {
+    const startedAt = Date.now();
+    const res = await fetch(API_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -235,20 +257,26 @@ async function callLlm({ systemInstruction, messages, schemaName, responseSchema
       },
       body: JSON.stringify(body)
     });
+
+    return { res, body, mode, latencyMs: Date.now() - startedAt };
   };
 
-  let res = await send(structuredOutputMode);
+  let attempt = await send(structuredOutputMode);
+  let res = attempt.res;
 
   // Einmalige Herabstufung, falls der Endpoint json_schema nicht kann (siehe oben).
   if (res.status === 400 && structuredOutputMode === 'json_schema') {
     const errText = await res.text();
+    recordAttempt(kind, attempt, { responseText: errText, error: `HTTP 400: ${truncateForLog(errText)}` });
+
     if (SCHEMA_UNSUPPORTED_PATTERN.test(errText)) {
       console.warn(
         'Endpoint lehnt json_schema ab, falle ab jetzt auf json_object zurueck. Antwort war:',
         truncateForLog(errText)
       );
       structuredOutputMode = 'json_object';
-      res = await send(structuredOutputMode);
+      attempt = await send(structuredOutputMode);
+      res = attempt.res;
     } else {
       throw new Error(`LLM API Fehler (400): ${errText}`);
     }
@@ -256,6 +284,7 @@ async function callLlm({ systemInstruction, messages, schemaName, responseSchema
 
   if (!res.ok) {
     const errText = await res.text();
+    recordAttempt(kind, attempt, { responseText: errText, error: `HTTP ${res.status}: ${truncateForLog(errText)}` });
 
     if (res.status === 429) {
       throw buildRateLimitError(res, errText);
@@ -272,6 +301,13 @@ async function callLlm({ systemInstruction, messages, schemaName, responseSchema
   const choice = data?.choices?.[0];
   const rawText = extractContent(choice?.message);
 
+  recordAttempt(kind, attempt, {
+    responseText: safeStringify(data),
+    content: rawText,
+    usage: data?.usage ?? null,
+    finishReason: choice?.finish_reason ?? null
+  });
+
   if (!rawText.trim()) {
     throw new Error('Die API hat keine verwertbare Antwort geliefert.');
   }
@@ -285,6 +321,33 @@ async function callLlm({ systemInstruction, messages, schemaName, responseSchema
   return rawText;
 }
 
+/** Baut einen Log-Eintrag aus Versuch plus Ergebnis und gibt ihn an den Recorder weiter. */
+function recordAttempt(kind, attempt, result) {
+  record({
+    kind: kind ?? 'unknown',
+    model: LLM_MODEL,
+    structuredMode: attempt.mode,
+    status: attempt.res.status ?? null,
+    ok: attempt.res.ok === true,
+    latencyMs: attempt.latencyMs,
+    request: attempt.body,
+    responseText: result.responseText ?? null,
+    content: result.content ?? null,
+    usage: result.usage ?? null,
+    finishReason: result.finishReason ?? null,
+    error: result.error ?? null
+  });
+}
+
+/** Ein Response-Envelope soll das Logging nie zum Werfen bringen (z.B. bei Zyklen). */
+function safeStringify(value) {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
 /**
  * Fragt das Modell nach einer Antwort.
  * @returns {Promise<{reply: string, newUserMemories: string[], newServerMemories: string[]}>}
@@ -294,6 +357,7 @@ export async function askLlm({ persona, shortTermMessages, userMemories, serverM
   const messages = buildConversation(shortTermMessages, currentUserName, currentUserMessage);
 
   const rawText = await callLlm({
+    kind: 'reply',
     systemInstruction,
     messages,
     schemaName: 'discord_reply',
@@ -380,6 +444,7 @@ export async function extractMemories({ persona, messages }) {
   const transcript = messages.map((m) => `UserID ${m.authorId} (${m.authorName}): ${m.content}`).join('\n');
 
   const rawText = await callLlm({
+    kind: 'extract',
     systemInstruction,
     messages: [{ role: 'user', content: transcript }],
     schemaName: 'extracted_memories',

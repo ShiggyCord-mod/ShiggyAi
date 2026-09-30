@@ -13,7 +13,8 @@ const {
   MAX_MEMORY_ITEMS,
   MAX_MEMORY_LENGTH,
   resetStructuredOutputMode,
-  getStructuredOutputMode
+  getStructuredOutputMode,
+  setCallRecorder
 } = await import('../src/llm.js');
 
 function mockFetchOnce(response) {
@@ -513,5 +514,116 @@ test('LLM_BASE_URL laesst sich auf einen anderen OpenAI-kompatiblen Endpoint umb
   } finally {
     if (saved === undefined) delete process.env.LLM_BASE_URL;
     else process.env.LLM_BASE_URL = saved;
+  }
+});
+
+// ---- Call-Recorder: Datenbasis fuer Verlauf und Token-Aufschluesselung ----
+
+test('setCallRecorder bekommt Request, Antwort, usage und Laufzeit gemeldet', async () => {
+  resetStructuredOutputMode();
+  const seen = [];
+  setCallRecorder((entry) => seen.push(entry));
+  const restore = mockFetchSequence([{
+    ok: true,
+    status: 200,
+    json: async () => ({
+      choices: [{ finish_reason: 'stop', message: { role: 'assistant', content: JSON.stringify({ reply: 'hi' }) } }],
+      usage: { prompt_tokens: 42, completion_tokens: 7, total_tokens: 49 }
+    })
+  }]);
+
+  try {
+    await askLlm(baseArgs);
+    assert.equal(seen.length, 1);
+    const e = seen[0];
+    assert.equal(e.kind, 'reply');
+    assert.equal(e.ok, true);
+    assert.equal(e.status, 200);
+    assert.deepEqual(e.usage, { prompt_tokens: 42, completion_tokens: 7, total_tokens: 49 });
+    assert.equal(e.finishReason, 'stop');
+    assert.equal(e.structuredMode, 'json_schema');
+    assert.equal(e.request.messages[0].role, 'system', 'der System-Prompt gehoert in den Mitschnitt');
+    assert.ok(Number.isFinite(e.latencyMs));
+    assert.ok(e.responseText.includes('usage'), 'der ganze Envelope wird festgehalten');
+  } finally {
+    restore();
+    setCallRecorder(null);
+    resetStructuredOutputMode();
+  }
+});
+
+test('extractMemories meldet sich als kind "extract"', async () => {
+  resetStructuredOutputMode();
+  const seen = [];
+  setCallRecorder((entry) => seen.push(entry));
+  const restore = mockFetchSequence([completion(JSON.stringify({ user_memories: [], server_memories: [] }))]);
+
+  try {
+    await extractMemories({ persona: 'P', messages: [{ authorId: '1', authorName: 'A', content: 'hi' }] });
+    assert.equal(seen[0].kind, 'extract');
+  } finally {
+    restore();
+    setCallRecorder(null);
+    resetStructuredOutputMode();
+  }
+});
+
+test('auch der fehlgeschlagene Versuch einer Herabstufung wird mitgeschrieben', async () => {
+  // Sonst fehlen im Verlauf genau die Calls, die Geld gekostet haben aber nichts geliefert haben.
+  resetStructuredOutputMode();
+  const seen = [];
+  setCallRecorder((entry) => seen.push(entry));
+  const restore = mockFetchSequence([
+    badRequest('response_format json_schema not supported'),
+    completion(JSON.stringify({ reply: 'ok' }))
+  ]);
+
+  try {
+    await askLlm(baseArgs);
+    assert.equal(seen.length, 2, 'Fehlversuch und Retry');
+    assert.equal(seen[0].ok, false);
+    assert.equal(seen[0].status, 400);
+    assert.equal(seen[0].structuredMode, 'json_schema');
+    assert.match(seen[0].error, /HTTP 400/);
+    assert.equal(seen[1].ok, true);
+    assert.equal(seen[1].structuredMode, 'json_object');
+  } finally {
+    restore();
+    setCallRecorder(null);
+    resetStructuredOutputMode();
+  }
+});
+
+test('ein 429 wird mitgeschrieben, bevor der Fehler geworfen wird', async () => {
+  resetStructuredOutputMode();
+  const seen = [];
+  setCallRecorder((entry) => seen.push(entry));
+  const restore = mockFetchSequence([rateLimited('{"error":{"message":"slow down"}}', { 'retry-after': '30' })]);
+
+  try {
+    await assert.rejects(() => askLlm(baseArgs), LlmRateLimitError);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].ok, false);
+    assert.equal(seen[0].status, 429);
+    assert.equal(seen[0].usage, null, 'ein Fehlversuch liefert keine Tokenzahlen');
+  } finally {
+    restore();
+    setCallRecorder(null);
+    resetStructuredOutputMode();
+  }
+});
+
+test('ein werfender Recorder bringt den Bot nicht um', async () => {
+  resetStructuredOutputMode();
+  setCallRecorder(() => { throw new Error('Log kaputt'); });
+  const restore = mockFetchSequence([completion(JSON.stringify({ reply: 'trotzdem da' }))]);
+
+  try {
+    const result = await askLlm(baseArgs);
+    assert.equal(result.reply, 'trotzdem da');
+  } finally {
+    restore();
+    setCallRecorder(null);
+    resetStructuredOutputMode();
   }
 });

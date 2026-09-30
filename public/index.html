@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bot Dashboard</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span id="readyDot" class="dot" title="Verbindungsstatus"></span>
+    <div>
+      <div class="brand-name" id="botTag">Bot Dashboard</div>
+      <div class="brand-sub" id="botSub">verbinde...</div>
+    </div>
+  </div>
+  <div class="topbar-actions">
+    <div class="export-group">
+      <span class="export-label">Export</span>
+      <a class="btn" href="/api/export/memories">Erinnerungen</a>
+      <a class="btn" href="/api/export/calls">Verlauf</a>
+      <a class="btn btn-primary" href="/api/export/all">Alles</a>
+    </div>
+    <button class="btn btn-icon" id="themeToggle" title="Hell/Dunkel umschalten" aria-label="Hell/Dunkel umschalten">◐</button>
+    <button class="btn btn-icon" id="refreshBtn" title="Neu laden" aria-label="Neu laden">⟳</button>
+  </div>
+</header>
+
+<nav class="tabs" role="tablist">
+  <button class="tab is-active" data-view="overview" role="tab">Übersicht</button>
+  <button class="tab" data-view="messages" role="tab">Nachrichten</button>
+  <button class="tab" data-view="memories" role="tab">Erinnerungen</button>
+  <button class="tab" data-view="calls" role="tab">Verlauf</button>
+  <button class="tab" data-view="tokens" role="tab">Tokens</button>
+</nav>
+
+<main>
+  <!-- ÜBERSICHT -->
+  <section class="view is-active" id="view-overview">
+    <div class="kpi-row" id="overviewKpis"></div>
+    <div class="grid-2">
+      <div class="card">
+        <h2>API</h2>
+        <dl class="deflist" id="apiInfo"></dl>
+      </div>
+      <div class="card">
+        <h2>Bot &amp; Limits</h2>
+        <dl class="deflist" id="botInfo"></dl>
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <h2>Server <span class="count" id="guildCount"></span></h2>
+        <div class="table-wrap"><table id="guildTable"></table></div>
+      </div>
+      <div class="card">
+        <h2>Erinnerungen</h2>
+        <dl class="deflist" id="memInfo"></dl>
+        <div id="capWarning"></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Persona (System-Prompt)</h2>
+      <pre class="pre" id="personaBox"></pre>
+    </div>
+  </section>
+
+  <!-- NACHRICHTEN -->
+  <section class="view" id="view-messages">
+    <div class="filters">
+      <label><input type="checkbox" id="msgAddressedOnly"> nur an den Bot gerichtet</label>
+      <select id="msgGuild"><option value="">alle Server</option></select>
+      <select id="msgLimit">
+        <option value="50">50 Zeilen</option>
+        <option value="100">100</option>
+        <option value="250">250</option>
+      </select>
+      <span class="filler"></span>
+      <span class="muted" id="msgTotal"></span>
+      <button class="btn btn-danger" id="msgClear">Log leeren</button>
+    </div>
+    <div class="card card-flush">
+      <div class="table-wrap"><table id="msgTable"></table></div>
+    </div>
+  </section>
+
+  <!-- ERINNERUNGEN -->
+  <section class="view" id="view-memories">
+    <div class="grid-sidebar">
+      <aside class="card">
+        <h2>Besitzer</h2>
+        <div class="owner-list" id="ownerList"></div>
+      </aside>
+      <div>
+        <div class="filters">
+          <select id="memScope">
+            <option value="">alle Arten</option>
+            <option value="user">nur User</option>
+            <option value="guild">nur Server</option>
+          </select>
+          <input type="search" id="memSearch" placeholder="Inhalt durchsuchen...">
+          <button class="btn" id="memClearFilter">Filter zurücksetzen</button>
+          <span class="filler"></span>
+          <span class="muted" id="memTotal"></span>
+        </div>
+        <div class="card card-flush">
+          <div class="table-wrap"><table id="memTable"></table></div>
+        </div>
+        <div class="card">
+          <h2>Erinnerung hinzufügen</h2>
+          <form class="addform" id="memAddForm">
+            <select id="addScope">
+              <option value="user">User (serverübergreifend)</option>
+              <option value="guild">Server</option>
+            </select>
+            <input id="addOwner" placeholder="User-ID bzw. Server-ID" required>
+            <input id="addContent" placeholder="Inhalt der Erinnerung" required>
+            <button class="btn btn-primary" type="submit">Speichern</button>
+          </form>
+          <p class="muted small" id="addHint"></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- VERLAUF -->
+  <section class="view" id="view-calls">
+    <div class="filters">
+      <select id="callKind">
+        <option value="">alle Arten</option>
+        <option value="reply">reply (Antwort)</option>
+        <option value="extract">extract (passives Lernen)</option>
+      </select>
+      <label><input type="checkbox" id="callErrorsOnly"> nur Fehler</label>
+      <select id="callLimit">
+        <option value="50">50 Zeilen</option>
+        <option value="100">100</option>
+        <option value="250">250</option>
+      </select>
+      <span class="filler"></span>
+      <span class="muted" id="callTotal"></span>
+      <button class="btn btn-danger" id="callClear">Log leeren</button>
+    </div>
+    <div class="card card-flush">
+      <div class="table-wrap"><table id="callTable"></table></div>
+    </div>
+  </section>
+
+  <!-- TOKENS -->
+  <section class="view" id="view-tokens">
+    <div class="kpi-row" id="tokenKpis"></div>
+    <div class="card">
+      <h2>Tokenverbrauch pro Tag</h2>
+      <div class="legend" id="tokenLegend"></div>
+      <div id="tokenChart" class="chart"></div>
+      <details class="table-toggle">
+        <summary>Als Tabelle anzeigen</summary>
+        <div class="table-wrap"><table id="tokenDayTable"></table></div>
+      </details>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <h2>Nach Art</h2>
+        <div class="table-wrap"><table id="tokenKindTable"></table></div>
+      </div>
+      <div class="card">
+        <h2>Nach Modell</h2>
+        <div class="table-wrap"><table id="tokenModelTable"></table></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script src="/app.js" type="module"></script>
+</body>
+</html>
