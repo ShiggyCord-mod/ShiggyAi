@@ -807,3 +807,40 @@ test('ein 429 wird NICHT wiederholt - dafuer ist der Rate Limiter da', async () 
     resetStructuredOutputMode();
   }
 });
+
+test('sendWithRetry bricht ab, wenn das Zeitbudget keinen weiteren Anlauf mehr traegt', async () => {
+  // Am echten Endpoint braucht ein Versuch 4,6-6,6s. Ohne Zeitdeckel wartet der User rund 19
+  // Sekunden auf einen Fehler, obwohl der Typing-Indikator nach 10s ausgelaufen ist.
+  resetStructuredOutputMode();
+  const original = globalThis.fetch;
+  let calls = 0;
+  const SLOW_MS = 7000;
+
+  // Der Aufruf selbst wird nicht wirklich langsam gemacht - stattdessen meldet der Mock eine
+  // hohe Latenz zurueck, denn genau die rechnet das Budget gegen.
+  globalThis.fetch = async () => {
+    calls++;
+    return {
+      ok: false,
+      status: 502,
+      headers: { get: () => null },
+      text: async () => '<html><head><title>502: Bad gateway</title></head></html>'
+    };
+  };
+  const realNow = Date.now;
+  let clock = realNow();
+  Date.now = () => (clock += SLOW_MS); // jeder Zeitabruf springt um die Dauer eines Versuchs
+
+  try {
+    await assert.rejects(() => askLlm(baseArgs), (err) => {
+      assert.equal(err.name, 'LlmUnavailableError');
+      assert.ok(err.attempts < 3, `nach ${err.attempts} Versuchen abgebrochen, nicht erst nach 3`);
+      return true;
+    });
+    assert.ok(calls < 3, `${calls} Versuche - das Budget hat weitere verhindert`);
+  } finally {
+    Date.now = realNow;
+    globalThis.fetch = original;
+    resetStructuredOutputMode();
+  }
+});

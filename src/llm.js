@@ -26,6 +26,14 @@ const RETRYABLE_STATUS = new Set([408, 425, 502, 503, 504]);
 const RETRY_ATTEMPTS = Math.max(0, parseInt(process.env.LLM_RETRY_ATTEMPTS || '2', 10));
 const RETRY_BASE_DELAY_MS = 400;
 
+// Zeitdeckel ueber alle Versuche zusammen. Gemessen am echten Endpoint: ein Versuch braucht
+// 4,6-6,6 Sekunden, auch der erfolgreiche (5,5s). Drei Versuche sind damit rund 19 Sekunden
+// Wartezeit fuer eine Antwort, die wahrscheinlich doch ein Fehler wird - und der
+// Typing-Indikator in Discord laeuft schon nach 10 Sekunden aus. Lieber frueher ehrlich
+// abbrechen als den User ins Leere warten lassen. Wiederholen hilft gegen einen kurzen Blip,
+// nicht gegen einen Endpoint, der dauerhaft am Timeout kratzt.
+const RETRY_BUDGET_MS = Math.max(0, parseInt(process.env.LLM_RETRY_BUDGET_MS || '12000', 10));
+
 // Sicherheitsnetz gegen ausufernde/kaputte Antworten (siehe Vorfall: Modell generierte endlos
 // fast-identische Memory-Strings bis zum impliziten Token-Limit -> riesige, nicht parsbare
 // Antwort, die roh in Discord landete). Bewusst interne Konstanten statt .env-Variablen: das ist
@@ -103,11 +111,12 @@ export class LlmRateLimitError extends Error {
  * nicht weiter.
  */
 export class LlmUnavailableError extends Error {
-  constructor(message, { status = null, attempts = 1 } = {}) {
+  constructor(message, { status = null, attempts = 1, gaveUpAfterMs = null } = {}) {
     super(message);
     this.name = 'LlmUnavailableError';
     this.status = status;
     this.attempts = attempts;
+    this.gaveUpAfterMs = gaveUpAfterMs;
   }
 }
 
@@ -393,6 +402,9 @@ function readHeaders(res) {
  * Endpoint wackelt - das ist bei einem Proxy-Anbieter die interessantere Zahl als der Erfolg.
  */
 async function sendWithRetry(kind, mode, send) {
+  const startedAt = Date.now();
+  const budgetLeft = () => RETRY_BUDGET_MS - (Date.now() - startedAt);
+
   for (let tryNo = 1; ; tryNo++) {
     let attempt;
     try {
@@ -411,8 +423,11 @@ async function sendWithRetry(kind, mode, send) {
         error: `Netzwerkfehler (Versuch ${tryNo}): ${err?.message ?? err}`
       });
 
-      if (tryNo > RETRY_ATTEMPTS) {
-        throw new LlmUnavailableError(`Endpoint nicht erreichbar: ${err?.message ?? err}`, { attempts: tryNo });
+      if (tryNo > RETRY_ATTEMPTS || budgetLeft() <= backoffMs(tryNo)) {
+        throw new LlmUnavailableError(`Endpoint nicht erreichbar: ${err?.message ?? err}`, {
+          attempts: tryNo,
+          gaveUpAfterMs: Date.now() - startedAt
+        });
       }
       await sleep(backoffMs(tryNo));
       continue;
@@ -426,10 +441,13 @@ async function sendWithRetry(kind, mode, send) {
       error: `HTTP ${attempt.res.status} (Versuch ${tryNo}): ${summary}`
     });
 
-    if (tryNo > RETRY_ATTEMPTS) {
+    // Aufhoeren, wenn die Versuche aufgebraucht sind ODER das Zeitbudget nicht mehr fuer einen
+    // weiteren Anlauf reicht (ein Versuch dauert hier realistisch mehrere Sekunden).
+    if (tryNo > RETRY_ATTEMPTS || budgetLeft() <= backoffMs(tryNo) + attempt.latencyMs) {
       throw new LlmUnavailableError(`Endpoint antwortet mit ${attempt.res.status}: ${summary}`, {
         status: attempt.res.status,
-        attempts: tryNo
+        attempts: tryNo,
+        gaveUpAfterMs: Date.now() - startedAt
       });
     }
     await sleep(backoffMs(tryNo));

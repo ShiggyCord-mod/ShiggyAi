@@ -240,6 +240,20 @@ Drei Faelle sind abgedeckt:
    `429` und `500` werden absichtlich nicht wiederholt: das eine regelt der Rate Limiter, das
    andere ist die Anwendung des Anbieters selbst und meist deterministisch.
 
+   Ueber alle Versuche zusammen gilt zusaetzlich `LLM_RETRY_BUDGET_MS`. Gemessen am
+   Standard-Endpoint braucht ein Versuch 4,6-6,6 Sekunden, auch ein erfolgreicher (5,5s) - der
+   Origin liegt also chronisch an der Timeout-Grenze des Gateways, und jeder Call ist ein
+   Muenzwurf. Drei Versuche waeren damit rund 19 Sekunden Warten auf einen wahrscheinlichen
+   Fehlschlag, wobei der Typing-Indikator schon nach 10 Sekunden ausgelaufen ist. Wiederholen
+   hilft gegen einen kurzen Blip, nicht gegen einen dauerhaft langsamen Endpoint - deshalb
+   lieber frueher ehrlich abbrechen.
+
+   Der wirksamere Hebel ist in dem Fall die Groesse der Eingabe: gemessen bestand der
+   System-Prompt zu 66 Prozent aus dem Erinnerungsblock (5681 von 8622 Zeichen). Weniger Eingabe
+   heisst kuerzere Generierung heisst seltener ins Timeout - das Aufraeumen der Erinnerungen
+   (siehe oben) ist damit nicht nur Hygiene, sondern die naheliegendste Verbesserung der
+   Zuverlaessigkeit.
+
 Jeder Versuch steht einzeln im Verlauf, auch die fehlgeschlagenen. Wie oft der Endpoint wackelt,
 ist bei einem Proxy-Anbieter die interessantere Zahl als die Erfolgsquote. HTML-Fehlerseiten
 werden dabei auf eine Zeile zusammengefasst (der beobachtete 502 war 6442 Zeichen) - sonst

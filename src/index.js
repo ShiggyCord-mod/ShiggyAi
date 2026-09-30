@@ -564,8 +564,11 @@ function formatUnavailableMessage(err) {
   const what = err.status
     ? `is not responding right now (HTTP ${err.status} from its gateway)`
     : 'could not be reached at all right now';
+  const spent = Number.isFinite(err.gaveUpAfterMs)
+    ? ` over ${Math.round(err.gaveUpAfterMs / 1000)}s`
+    : '';
   return (
-    `The model provider ${what}. I already retried ${err.attempts} times. ` +
+    `The model provider ${what}. I retried ${err.attempts} times${spent} before giving up. ` +
     "That's on their end, not mine - try again in a minute or two."
   );
 }
