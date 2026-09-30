@@ -1,7 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { MessageFlags } from 'discord.js';
-import { buildMemoryPage, parseMemoryButtonId, MEMORY_PAGE_SIZE } from '../src/pagination.js';
+import {
+  buildMemoryPage,
+  parseMemoryButtonId,
+  renderMemoryLines,
+  MEMORY_PAGE_SIZE,
+  TEXT_DISPLAY_LIMIT
+} from '../src/pagination.js';
 
 function makeEntries(count) {
   return Array.from({ length: count }, (_, i) => ({ id: i + 1, content: `fakt-${i + 1}` }));
@@ -82,4 +88,45 @@ test('buildMemoryPage und parseMemoryButtonId sind roundtrip-kompatibel', () => 
   const parsed = parseMemoryButtonId(nextButton.data.custom_id);
 
   assert.deepEqual(parsed, { mode: 'user', targetUserId: 'u1', page: 2 });
+});
+
+test('buildMemoryPage bleibt unter dem TextDisplay-Limit, wenn ein Eintrag ausufert', () => {
+  // Regression: MAX_MEMORY_LENGTH wird nur beim Schreiben durch das Modell erzwungen, nicht in
+  // der DB - ueber /memory admin add-user und aus Altdaten landen laengere Inhalte in der
+  // Tabelle. Vorher warf TextDisplayBuilder dann "Invalid string length".
+  const entries = makeEntries(MEMORY_PAGE_SIZE);
+  entries[0].content = 'x'.repeat(5000);
+
+  const page = buildMemoryPage({ mode: 'user', targetUserId: 'u1', page: 0, entries });
+  const text = page.components[0].components[0].data.content;
+  assert.ok(text.length <= TEXT_DISPLAY_LIMIT, `${text.length} > ${TEXT_DISPLAY_LIMIT}`);
+});
+
+test('buildMemoryPage zeigt trotz eines ausufernden Eintrags alle Eintraege der Seite', () => {
+  // Nur die fertige Seite abzuschneiden wuerde den Rest der Seite verschlucken - und ueber
+  // keine andere Seite erreichbar machen, da die Seitengrenzen fix sind.
+  const entries = makeEntries(MEMORY_PAGE_SIZE);
+  entries[0].content = 'x'.repeat(5000);
+
+  const page = buildMemoryPage({ mode: 'user', targetUserId: 'u1', page: 0, entries });
+  const text = page.components[0].components[0].data.content;
+  for (const entry of entries) {
+    assert.ok(text.includes(`\`${entry.id}\``), `Eintrag ${entry.id} fehlt auf der Seite`);
+  }
+});
+
+test('renderMemoryLines verteilt das Budget gleichmaessig und haelt es insgesamt ein', () => {
+  const entries = makeEntries(10).map((e) => ({ ...e, content: 'y'.repeat(1000) }));
+  const lines = renderMemoryLines(entries, 2000);
+  assert.equal(lines.length, 10);
+  assert.ok(lines.join('\n').length <= 2000 + 10);
+});
+
+test('renderMemoryLines laesst kurze Eintraege unangetastet', () => {
+  const lines = renderMemoryLines(makeEntries(3), 4000);
+  assert.deepEqual(lines, ['`1` - fakt-1', '`2` - fakt-2', '`3` - fakt-3']);
+});
+
+test('renderMemoryLines gibt bei leerer Liste ein leeres Array zurueck (keine Division durch 0)', () => {
+  assert.deepEqual(renderMemoryLines([], 4000), []);
 });

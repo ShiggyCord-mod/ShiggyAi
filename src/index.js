@@ -12,9 +12,9 @@ import {
   clearUserMemories
 } from './db.js';
 import { RateLimiter } from './rateLimiter.js';
-import { buildMemoryPage, parseMemoryButtonId } from './pagination.js';
+import { buildMemoryPage, parseMemoryButtonId, renderMemoryLines } from './pagination.js';
 import { chunkText } from './textChunking.js';
-import { statusEmbed } from './statusEmbed.js';
+import { statusEmbed, EMBED_DESCRIPTION_LIMIT } from './statusEmbed.js';
 
 const BOT_PERSONA = process.env.BOT_PERSONA || 'Du bist ein hilfreicher Discord-Bot.';
 
@@ -231,6 +231,22 @@ if (LEARNING_ENABLED) {
 
 // ---- Slash Commands ----
 client.on('interactionCreate', async (interaction) => {
+  try {
+    await routeInteraction(interaction);
+  } catch (err) {
+    // Ohne diesen Catch wird aus jedem Fehler hier eine unhandled rejection, und Node beendet
+    // den Prozess dann standardmaessig - ein einzelner kaputter Command haette also nicht nur
+    // sich selbst, sondern den ganzen Bot mitgenommen.
+    console.error('Fehler beim Verarbeiten einer Interaction:', err);
+    await safeRespond(interaction, statusEmbed('Oops, something went wrong. Check the logs.'));
+  }
+});
+
+/**
+ * Verteilt eine Interaction auf den passenden Handler. Darf absichtlich nach oben durchwerfen -
+ * der Catch im Listener macht daraus eine Nachricht an den User statt eines Prozess-Endes.
+ */
+async function routeInteraction(interaction) {
   if (interaction.isButton()) {
     await handleMemoryPaginationButton(interaction);
     return;
@@ -331,7 +347,9 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.reply({ ...statusEmbed("I don't currently remember anything about you."), ephemeral: true });
       return;
     }
-    const list = memories.map((m) => `\`${m.id}\` - ${m.content}`).join('\n');
+    // Budget minus Trennzeichen: 25 Eintraege durchschnittlicher Laenge reissen die 4096
+    // Zeichen der Embed-Description sonst muehelos, und der Command wirft statt zu antworten.
+    const list = renderMemoryLines(memories, EMBED_DESCRIPTION_LIMIT - memories.length).join('\n');
     await interaction.reply({ ...statusEmbed(list, 'What I remember about you (cross-server)'), ephemeral: true });
   }
 
@@ -348,7 +366,7 @@ client.on('interactionCreate', async (interaction) => {
     const count = clearUserMemories(userId);
     await interaction.reply({ ...statusEmbed(`Deleted ${count} ${count === 1 ? 'memory' : 'memories'}.`), ephemeral: true });
   }
-});
+}
 
 /**
  * Behandelt Klicks auf die Vor/Zurueck-Buttons der /memory admin Listen (Components V2).
@@ -482,4 +500,24 @@ async function sendChunked(message, text) {
   }
 }
 
-client.login(process.env.DISCORD_TOKEN);
+/**
+ * Meldet einen Fehler an den User zurueck, ohne selbst zu werfen. Ob die Interaction schon
+ * beantwortet ist, entscheidet ueber reply vs. followUp - und schlaegt auch das fehl (Token
+ * abgelaufen, Interaction unbekannt), bleibt es beim Log.
+ */
+async function safeRespond(interaction, payload) {
+  try {
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp({ ...payload, flags: MessageFlags.Ephemeral });
+    } else {
+      await interaction.reply({ ...payload, flags: MessageFlags.Ephemeral });
+    }
+  } catch (err) {
+    console.error('Konnte dem User den Fehler nicht melden:', err);
+  }
+}
+
+client.login(process.env.DISCORD_TOKEN).catch((err) => {
+  console.error('Login bei Discord fehlgeschlagen:', err);
+  process.exit(1);
+});
