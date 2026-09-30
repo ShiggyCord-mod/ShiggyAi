@@ -14,7 +14,8 @@ const {
   MAX_MEMORY_LENGTH,
   resetStructuredOutputMode,
   getStructuredOutputMode,
-  setCallRecorder
+  setCallRecorder,
+  LlmUnavailableError
 } = await import('../src/llm.js');
 
 function mockFetchOnce(response) {
@@ -692,6 +693,117 @@ test('ein werfender Recorder bringt den Bot nicht um', async () => {
   } finally {
     restore();
     setCallRecorder(null);
+    resetStructuredOutputMode();
+  }
+});
+
+// ---- Transiente Ausfaelle des Endpoints ----
+// Anlass: im Betrieb kam eine Cloudflare-502-Seite von 6442 Zeichen zurueck. Minuten spaeter
+// lief derselbe Endpoint wieder - ohne Retry kostet so ein Blip jedes Mal eine Antwort.
+
+/** 502 mit einer HTML-Fehlerseite, wie Cloudflare sie liefert. */
+function badGateway() {
+  const page = '<!DOCTYPE html><html lang="en-US"><head><title>codecraftapi.com | 502: Bad gateway</title>'
+    + '<meta charset="UTF-8" />'.repeat(200) + '</head><body>error</body></html>';
+  return { ok: false, status: 502, headers: { get: () => null }, text: async () => page };
+}
+
+test('askLlm wiederholt einen 502 und liefert die Antwort des gelungenen Versuchs', async () => {
+  resetStructuredOutputMode();
+  const restore = mockFetchSequence([badGateway(), completion(JSON.stringify({ reply: 'endlich da' }))]);
+
+  try {
+    const result = await askLlm(baseArgs);
+    assert.equal(result.reply, 'endlich da');
+    assert.equal(restore.calls.length, 2, 'ein Fehlversuch plus ein erfolgreicher');
+  } finally {
+    restore();
+    resetStructuredOutputMode();
+  }
+});
+
+test('askLlm wirft LlmUnavailableError, wenn der Endpoint dauerhaft mit 502 antwortet', async () => {
+  resetStructuredOutputMode();
+  const restore = mockFetchSequence([badGateway()]);
+
+  try {
+    await assert.rejects(() => askLlm(baseArgs), (err) => {
+      assert.equal(err.name, 'LlmUnavailableError');
+      assert.equal(err.status, 502);
+      assert.ok(err.attempts >= 2, 'es wurde wiederholt');
+      assert.match(err.message, /502: Bad gateway/, 'der Titel der Fehlerseite steht in der Meldung');
+      return true;
+    });
+  } finally {
+    restore();
+    resetStructuredOutputMode();
+  }
+});
+
+test('eine HTML-Fehlerseite landet zusammengefasst im Log, nicht in voller Laenge', async () => {
+  // Sonst frisst eine einzige 502-Seite mehrere Kilobyte im Ringpuffer und im Export.
+  resetStructuredOutputMode();
+  const seen = [];
+  setCallRecorder((entry) => seen.push(entry));
+  const restore = mockFetchSequence([badGateway()]);
+
+  try {
+    await assert.rejects(() => askLlm(baseArgs));
+    assert.ok(seen.length >= 2, 'jeder Versuch wird protokolliert');
+    for (const entry of seen) {
+      assert.ok(entry.responseText.length < 200, `Log-Eintrag ist ${entry.responseText.length} Zeichen lang`);
+      assert.match(entry.responseText, /HTML-Fehlerseite, \d+ Zeichen\] codecraftapi\.com \| 502/);
+    }
+  } finally {
+    restore();
+    setCallRecorder(null);
+    resetStructuredOutputMode();
+  }
+});
+
+test('askLlm wiederholt auch einen Netzwerkfehler und meldet ihn danach als nicht erreichbar', async () => {
+  resetStructuredOutputMode();
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => { calls++; throw new TypeError('fetch failed'); };
+
+  try {
+    await assert.rejects(() => askLlm(baseArgs), (err) => {
+      assert.equal(err.name, 'LlmUnavailableError');
+      assert.match(err.message, /nicht erreichbar/);
+      return true;
+    });
+    assert.ok(calls >= 2, `es wurde wiederholt (${calls} Versuche)`);
+  } finally {
+    globalThis.fetch = original;
+    resetStructuredOutputMode();
+  }
+});
+
+test('ein 500 wird NICHT wiederholt - das ist die Anwendung des Anbieters, nicht das Gateway', async () => {
+  resetStructuredOutputMode();
+  const restore = mockFetchSequence([
+    { ok: false, status: 500, headers: { get: () => null }, text: async () => 'internal server error' }
+  ]);
+
+  try {
+    await assert.rejects(() => askLlm(baseArgs), /LLM API Fehler \(500\)/);
+    assert.equal(restore.calls.length, 1, 'genau ein Versuch');
+  } finally {
+    restore();
+    resetStructuredOutputMode();
+  }
+});
+
+test('ein 429 wird NICHT wiederholt - dafuer ist der Rate Limiter da', async () => {
+  resetStructuredOutputMode();
+  const restore = mockFetchSequence([rateLimited('{"error":{"message":"slow down"}}')]);
+
+  try {
+    await assert.rejects(() => askLlm(baseArgs), LlmRateLimitError);
+    assert.equal(restore.calls.length, 1);
+  } finally {
+    restore();
     resetStructuredOutputMode();
   }
 });

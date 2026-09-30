@@ -15,6 +15,17 @@ const API_URL = `${LLM_BASE_URL}/chat/completions`;
 // hier nur Latenz und Token-Budget.
 const REASONING_EFFORT = process.env.LLM_REASONING_EFFORT || '';
 
+// Transiente Ausfaelle: Der Endpoint steht hinter Cloudflare, und ein 502 heisst dort, dass
+// Cloudflare erreichbar ist, der Origin dahinter aber nicht antwortet. Ohne Retry kostet jeder
+// solche Blip eine Antwort - beobachtet im Betrieb, Minuten spaeter lief derselbe Endpoint
+// wieder. 429 gehoert bewusst NICHT dazu: das regelt der Rate Limiter, und sofort nachzufassen
+// macht es schlimmer. Ein 500 ebenfalls nicht - das ist die Anwendung des Anbieters selbst und
+// meist deterministisch (etwa ein Request, mit dem sie nicht umgehen kann), da hilft Wiederholen
+// nicht und kostet nur Zeit. Die Liste hier sind Gateway- und Timeout-Faelle.
+const RETRYABLE_STATUS = new Set([408, 425, 502, 503, 504]);
+const RETRY_ATTEMPTS = Math.max(0, parseInt(process.env.LLM_RETRY_ATTEMPTS || '2', 10));
+const RETRY_BASE_DELAY_MS = 400;
+
 // Sicherheitsnetz gegen ausufernde/kaputte Antworten (siehe Vorfall: Modell generierte endlos
 // fast-identische Memory-Strings bis zum impliziten Token-Limit -> riesige, nicht parsbare
 // Antwort, die roh in Discord landete). Bewusst interne Konstanten statt .env-Variablen: das ist
@@ -82,6 +93,21 @@ export class LlmRateLimitError extends Error {
     // da, wenn das Tagesfenster rollt, egal wie kurz man wartet.
     this.isDailyQuota = isDailyQuota;
     this.dailyQuotaLimit = dailyQuotaLimit;
+  }
+}
+
+/**
+ * Der Endpoint war nicht erreichbar oder hat dauerhaft mit einem transienten Fehler geantwortet
+ * (502/503/504, Verbindungsabbruch), auch nach den Wiederholungen. Eigener Typ, damit der Bot
+ * das ehrlich sagen kann: das ist kein Fehler im Bot, und ein Blick in die Logs hilft dem User
+ * nicht weiter.
+ */
+export class LlmUnavailableError extends Error {
+  constructor(message, { status = null, attempts = 1 } = {}) {
+    super(message);
+    this.name = 'LlmUnavailableError';
+    this.status = status;
+    this.attempts = attempts;
   }
 }
 
@@ -275,7 +301,7 @@ async function callLlm({ kind, systemInstruction, messages, schemaName, response
     return { res, body, mode, latencyMs: Date.now() - startedAt };
   };
 
-  let attempt = await send(structuredOutputMode);
+  let attempt = await sendWithRetry(kind, structuredOutputMode, send);
   let res = attempt.res;
 
   // Einmalige Herabstufung, falls der Endpoint json_schema nicht kann (siehe oben).
@@ -289,7 +315,7 @@ async function callLlm({ kind, systemInstruction, messages, schemaName, response
         truncateForLog(errText)
       );
       structuredOutputMode = 'json_object';
-      attempt = await send(structuredOutputMode);
+      attempt = await sendWithRetry(kind, structuredOutputMode, send);
       res = attempt.res;
     } else {
       throw new Error(`LLM API Fehler (400): ${errText}`);
@@ -298,7 +324,10 @@ async function callLlm({ kind, systemInstruction, messages, schemaName, response
 
   if (!res.ok) {
     const errText = await res.text();
-    recordAttempt(kind, attempt, { responseText: errText, error: `HTTP ${res.status}: ${truncateForLog(errText)}` });
+    recordAttempt(kind, attempt, {
+      responseText: summarizeErrorBody(errText),
+      error: `HTTP ${res.status}: ${summarizeErrorBody(errText)}`
+    });
 
     if (res.status === 429) {
       throw buildRateLimitError(res, errText);
@@ -356,6 +385,65 @@ function readHeaders(res) {
     return null; // ein Mock oder eine exotische Implementierung soll das Logging nicht stoppen
   }
   return Object.keys(out).length ? out : null;
+}
+
+/**
+ * Fuehrt den Request aus und wiederholt ihn bei transienten Ausfaellen mit steigender Wartezeit.
+ * Jeder Versuch wird einzeln protokolliert, damit im Verlauf sichtbar bleibt, wie oft der
+ * Endpoint wackelt - das ist bei einem Proxy-Anbieter die interessantere Zahl als der Erfolg.
+ */
+async function sendWithRetry(kind, mode, send) {
+  for (let tryNo = 1; ; tryNo++) {
+    let attempt;
+    try {
+      attempt = await send(mode);
+    } catch (err) {
+      // fetch wirft bei DNS-, Verbindungs- und Timeout-Fehlern, bevor es je eine Antwort gab
+      record({
+        kind: kind ?? 'unknown',
+        model: LLM_MODEL,
+        structuredMode: mode,
+        status: null,
+        ok: false,
+        latencyMs: null,
+        request: null,
+        responseText: null,
+        error: `Netzwerkfehler (Versuch ${tryNo}): ${err?.message ?? err}`
+      });
+
+      if (tryNo > RETRY_ATTEMPTS) {
+        throw new LlmUnavailableError(`Endpoint nicht erreichbar: ${err?.message ?? err}`, { attempts: tryNo });
+      }
+      await sleep(backoffMs(tryNo));
+      continue;
+    }
+
+    if (!RETRYABLE_STATUS.has(attempt.res.status)) return attempt;
+
+    const summary = summarizeErrorBody(await attempt.res.text());
+    recordAttempt(kind, attempt, {
+      responseText: summary,
+      error: `HTTP ${attempt.res.status} (Versuch ${tryNo}): ${summary}`
+    });
+
+    if (tryNo > RETRY_ATTEMPTS) {
+      throw new LlmUnavailableError(`Endpoint antwortet mit ${attempt.res.status}: ${summary}`, {
+        status: attempt.res.status,
+        attempts: tryNo
+      });
+    }
+    await sleep(backoffMs(tryNo));
+  }
+}
+
+// Steigende Wartezeit mit etwas Streuung, damit mehrere Channels nach einem Ausfall nicht
+// alle im selben Moment wieder anklopfen.
+function backoffMs(tryNo) {
+  return RETRY_BASE_DELAY_MS * 2 ** (tryNo - 1) + Math.floor(Math.random() * 150);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** Baut einen Log-Eintrag aus Versuch plus Ergebnis und gibt ihn an den Recorder weiter. */
@@ -432,6 +520,21 @@ export async function askLlm({ persona, shortTermMessages, userMemories, serverM
     newUserMemories: sanitizeMemoryList(parsed.new_user_memories, MAX_MEMORY_ITEMS),
     newServerMemories: sanitizeMemoryList(parsed.new_server_memories, MAX_MEMORY_ITEMS)
   };
+}
+
+/**
+ * Fehlerseiten von Proxies und CDNs sind HTML-Dokumente von mehreren Kilobyte - der beobachtete
+ * 502 war 6442 Zeichen gross. Vollstaendig im Ringpuffer zu halten ist reiner Ballast (und
+ * landet auch im Export), also wird daraus eine Zeile: der Titel, der die Aussage traegt.
+ */
+function summarizeErrorBody(text) {
+  const body = String(text ?? '').trim();
+  if (!body.startsWith('<')) return truncateForLog(body);
+
+  const title = body.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/\s+/g, ' ').trim();
+  return title
+    ? `[HTML-Fehlerseite, ${body.length} Zeichen] ${title}`
+    : `[HTML-Fehlerseite, ${body.length} Zeichen, ohne Titel]`;
 }
 
 function truncateForLog(text) {

@@ -7,6 +7,7 @@ import {
   getStructuredOutputMode,
   LlmRateLimitError,
   LlmBillingError,
+  LlmUnavailableError,
   GENERIC_FALLBACK_REPLY
 } from './llm.js';
 import {
@@ -197,6 +198,12 @@ client.on('messageCreate', async (message) => {
     if (err instanceof LlmBillingError) {
       console.error('LLM-API verlangt Billing (402):', err.message);
       await message.reply(statusEmbed(BILLING_MESSAGE));
+      return;
+    }
+
+    if (err instanceof LlmUnavailableError) {
+      console.warn(`LLM-API nicht erreichbar (${err.attempts} Versuche):`, err.message);
+      await message.reply(statusEmbed(formatUnavailableMessage(err)));
       return;
     }
 
@@ -531,6 +538,12 @@ async function handleAskCommand(interaction) {
       return;
     }
 
+    if (err instanceof LlmUnavailableError) {
+      console.warn(`LLM-API nicht erreichbar (${err.attempts} Versuche):`, err.message);
+      await interaction.editReply(statusEmbed(formatUnavailableMessage(err)));
+      return;
+    }
+
     console.error('Fehler beim Verarbeiten von /ask:', err);
     await interaction.editReply(statusEmbed('Oops, something went wrong while thinking. Check the logs.'));
   }
@@ -541,6 +554,21 @@ const BILLING_MESSAGE =
   "My API account can't run requests right now - the provider says payment is required (HTTP 402), " +
   'so the quota is used up or the model needs a paid plan. Only the bot owner can fix that, in the ' +
   "provider's billing settings.";
+
+/**
+ * Der Endpoint war nicht erreichbar. Bewusst OHNE "check the logs": das ist kein Fehler im Bot,
+ * und in den Logs steht fuer den User nichts Hilfreiches. Die Zahl der Versuche kommt mit rein,
+ * damit sichtbar ist, dass es nicht am ersten Anlauf gescheitert ist.
+ */
+function formatUnavailableMessage(err) {
+  const what = err.status
+    ? `is not responding right now (HTTP ${err.status} from its gateway)`
+    : 'could not be reached at all right now';
+  return (
+    `The model provider ${what}. I already retried ${err.attempts} times. ` +
+    "That's on their end, not mine - try again in a minute or two."
+  );
+}
 
 /**
  * Baut eine ehrliche Rate-Limit-Nachricht. Bei einem Tageskontingent waere ein kurzer

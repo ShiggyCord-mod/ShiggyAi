@@ -231,6 +231,19 @@ Drei Faelle sind abgedeckt:
 3. **402 vom Anbieter**: Kontingent aufgebraucht oder das Modell verlangt einen bezahlten
    Plan. Loest sich nicht durch Warten - der Bot sagt klar, dass nur der Betreiber das im
    Dashboard aendern kann.
+4. **Transienter Ausfall des Endpoints** (502/503/504, Verbindungsabbruch): Der Standard-Endpoint
+   sitzt hinter Cloudflare, und ein 502 heisst dort, dass Cloudflare erreichbar ist, der Origin
+   dahinter aber nicht antwortet. Beobachtet im Betrieb, Minuten spaeter lief derselbe Endpoint
+   wieder - ohne Wiederholung kostet jeder solche Blip eine Antwort. Der Bot wiederholt deshalb
+   `LLM_RETRY_ATTEMPTS` mal mit steigender Wartezeit und sagt erst danach, dass der Anbieter
+   nicht erreichbar ist - ausdruecklich ohne "schau in die Logs", denn es ist kein Fehler im Bot.
+   `429` und `500` werden absichtlich nicht wiederholt: das eine regelt der Rate Limiter, das
+   andere ist die Anwendung des Anbieters selbst und meist deterministisch.
+
+Jeder Versuch steht einzeln im Verlauf, auch die fehlgeschlagenen. Wie oft der Endpoint wackelt,
+ist bei einem Proxy-Anbieter die interessantere Zahl als die Erfolgsquote. HTML-Fehlerseiten
+werden dabei auf eine Zeile zusammengefasst (der beobachtete 502 war 6442 Zeichen) - sonst
+frisst ein einzelner Ausfall mehrere Kilobyte im Ringpuffer und im Export.
 
 ## Grenzen / moegliche Erweiterungen
 
