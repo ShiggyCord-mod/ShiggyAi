@@ -108,6 +108,16 @@ export function startDashboard({ client, runtime }) {
       console.error(`Dashboard-Port ${PORT} ist belegt - Dashboard startet nicht (der Bot laeuft weiter).`);
       return;
     }
+    // Tritt auf, wenn DASHBOARD_HOST die Adresse eines VPN-Interfaces ist und das Interface
+    // (noch) nicht da ist - etwa wenn der Bot vor Tailscale startet. Die generische Meldung
+    // waere hier wenig hilfreich, weil die Ursache ausserhalb des Bots liegt.
+    if (err.code === 'EADDRNOTAVAIL') {
+      console.error(
+        `Dashboard kann nicht an ${HOST} binden - diese Adresse gibt es auf dieser Maschine ` +
+          '(noch) nicht. Laeuft das zugehoerige Interface, z.B. Tailscale? Der Bot laeuft weiter.'
+      );
+      return;
+    }
     console.error('Dashboard-Server-Fehler:', err);
   });
 

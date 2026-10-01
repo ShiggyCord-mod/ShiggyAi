@@ -180,7 +180,9 @@ Auf einem Tailscale-Tailnet (`100.64.0.0/10`) ist eine IP-Freigabe eine belastba
 WireGuard beglaubigt den Peer kryptografisch, die Absenderadresse kann also nicht gefaelscht
 werden. Im offenen Internet waere das deutlich schwaecher - dort gehoert ein Reverse Proxy mit
 echter Authentifizierung davor. Bleibt die Freigabeliste leer, waehrend weiter als auf Loopback
-gebunden wird, warnt der Start ausdruecklich.
+gebunden wird, warnt der Start ausdruecklich. Bindet der Bot an eine VPN-Adresse und das
+Interface ist beim Start noch nicht da, sagt er das klar (`EADDRNOTAVAIL`) und laeuft ohne
+Dashboard weiter, statt abzubrechen - die Ursache liegt dann ausserhalb des Bots.
 
 Beide Logs sind Ringpuffer (`API_LOG_MAX_ROWS`, `MESSAGE_LOG_MAX_ROWS`) und lassen sich in der
 Oberflaeche leeren. Discord bleibt die Quelle der Wahrheit fuer den Chatverlauf - das
