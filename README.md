@@ -159,9 +159,28 @@ pro Eintrag Request **und** Antwort samt Tokenzahlen - genug, um den Verbrauch n
 
 Das Dashboard hat **bewusst keine Authentifizierung** und bindet deshalb standardmaessig nur auf
 `127.0.0.1`. Es zeigt komplette Chatverlaeufe, System-Prompts und persoenliche Fakten ueber
-Dritte. Fuer Zugriff von aussen `DASHBOARD_HOST=0.0.0.0` setzen **und** selbst etwas davorstellen
-(Reverse Proxy mit Auth, SSH-Tunnel, VPN). Der API-Key wird nie ausgeliefert, nur maskiert
-(`cc_ab...xyz`), und steht in keinem Export.
+Dritte. Der API-Key wird nie ausgeliefert, nur maskiert (`cc_ab...xyz`), und steht in keinem
+Export.
+
+Fuer Zugriff von aussen nicht einfach `0.0.0.0` setzen, sondern zwei Dinge kombinieren:
+
+```bash
+DASHBOARD_HOST=100.100.255.1          # die VPN-Adresse DIESER Maschine, nicht 0.0.0.0
+DASHBOARD_ALLOWED_IPS=100.100.255.201 # welcher Client zugreifen darf
+```
+
+`DASHBOARD_HOST` entscheidet, auf welchem Interface ueberhaupt gelauscht wird - bindet man an
+eine Tailscale-Adresse, weisen LAN und Internet die Verbindung schon auf TCP-Ebene ab.
+`DASHBOARD_ALLOWED_IPS` schraenkt danach ein, welche Clients bedient werden; geprueft wird die
+Socket-Adresse und **nicht** `X-Forwarded-For`, denn ohne vertrauenswuerdigen Proxy davor waere
+der Header frei waehlbar. Loopback und die gebundene Adresse selbst sind immer erlaubt, sonst
+sperrt man sich aus dem eigenen Dashboard aus.
+
+Auf einem Tailscale-Tailnet (`100.64.0.0/10`) ist eine IP-Freigabe eine belastbare Kontrolle:
+WireGuard beglaubigt den Peer kryptografisch, die Absenderadresse kann also nicht gefaelscht
+werden. Im offenen Internet waere das deutlich schwaecher - dort gehoert ein Reverse Proxy mit
+echter Authentifizierung davor. Bleibt die Freigabeliste leer, waehrend weiter als auf Loopback
+gebunden wird, warnt der Start ausdruecklich.
 
 Beide Logs sind Ringpuffer (`API_LOG_MAX_ROWS`, `MESSAGE_LOG_MAX_ROWS`) und lassen sich in der
 Oberflaeche leeren. Discord bleibt die Quelle der Wahrheit fuer den Chatverlauf - das

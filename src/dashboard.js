@@ -23,6 +23,47 @@ const PORT = parseInt(process.env.DASHBOARD_PORT || '1267', 10);
 // und stellt selbst etwas davor (Reverse Proxy mit Auth, SSH-Tunnel, VPN).
 const HOST = process.env.DASHBOARD_HOST || '127.0.0.1';
 
+// Freigabeliste der Client-Adressen. Leer heisst: jeder, der den gebundenen Port erreicht, darf
+// rein. Da das Dashboard keine Authentifizierung hat, ist diese Liste die einzige Kontrolle,
+// sobald nicht mehr nur auf Loopback gebunden wird.
+//
+// Auf einem Tailscale-Tailnet (100.64.0.0/10) ist eine IP-Freigabe eine belastbare Kontrolle und
+// keine Augenwischerei: WireGuard beglaubigt den Peer kryptografisch, eine Adresse auf
+// tailscale0 kann also nicht gefaelscht werden. Im offenen Internet waere das anders zu bewerten.
+const ALLOWED_IPS = new Set(
+  (process.env.DASHBOARD_ALLOWED_IPS || '')
+    .split(',')
+    .map((ip) => normalizeIp(ip.trim()))
+    .filter(Boolean)
+);
+
+// Immer erlaubt, unabhaengig von der Freigabeliste: wer auf der Maschine sitzt, kann die
+// SQLite-Datei sowieso lesen. Dazu gehoert neben Loopback auch die gebundene Adresse selbst -
+// ruft man das Dashboard auf dieser Maschine ueber ihre eigene VPN-Adresse auf, ist genau die
+// und nicht 127.0.0.1 die Quelladresse. Ohne diesen Fall sperrt man sich aus dem eigenen
+// Dashboard aus (nachgemessen: 403 beim Aufruf von http://100.100.255.1:1267 auf dem Host).
+const SELF_ADDRESSES = new Set(['127.0.0.1', '::1', normalizeIp(HOST)].filter(Boolean));
+
+/**
+ * Bringt eine Adresse auf eine vergleichbare Form. Node liefert bei einem Dual-Stack-Socket
+ * IPv4-Adressen als "::ffff:100.100.255.201" - ohne Normalisierung wuerde die Freigabeliste
+ * genau dann nicht greifen, wenn man sie braucht.
+ */
+export function normalizeIp(address) {
+  if (!address) return '';
+  const lower = address.toLowerCase();
+  const mapped = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (mapped) return mapped[1];
+  return lower.replace(/^\[|\]$/g, '').split('%')[0]; // Klammern und Zone-Index weg
+}
+
+export function isAllowed(address) {
+  const ip = normalizeIp(address);
+  if (SELF_ADDRESSES.has(ip)) return true;
+  if (ALLOWED_IPS.size === 0) return true;
+  return ALLOWED_IPS.has(ip);
+}
+
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const MAX_BODY_BYTES = 64 * 1024;
 
@@ -44,6 +85,16 @@ export function startDashboard({ client, runtime }) {
   const startedAt = Date.now();
 
   const server = http.createServer(async (req, res) => {
+    // Bewusst die Socket-Adresse und NICHT X-Forwarded-For: ohne vertrauenswuerdigen Proxy
+    // davor waere dieser Header frei waehlbar und die Freigabeliste damit wertlos.
+    const remote = req.socket?.remoteAddress ?? '';
+    if (!isAllowed(remote)) {
+      console.warn(`Dashboard-Zugriff abgewiesen: ${remote} steht nicht in DASHBOARD_ALLOWED_IPS`);
+      res.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Forbidden');
+      return;
+    }
+
     try {
       await route(req, res, { client, runtime, startedAt });
     } catch (err) {
@@ -62,10 +113,15 @@ export function startDashboard({ client, runtime }) {
 
   server.listen(PORT, HOST, () => {
     console.log(`Dashboard laeuft auf http://${HOST}:${PORT}`);
-    if (HOST === '0.0.0.0') {
+
+    const boundBeyondLoopback = !['127.0.0.1', '::1'].includes(normalizeIp(HOST));
+    if (boundBeyondLoopback && ALLOWED_IPS.size > 0) {
+      console.log(`Zugriff nur von: ${[...ALLOWED_IPS].join(', ')} (plus ${[...SELF_ADDRESSES].join(', ')})`);
+    } else if (boundBeyondLoopback) {
       console.warn(
-        'WARNUNG: DASHBOARD_HOST=0.0.0.0 - das Dashboard ist ohne Passwort aus dem Netz erreichbar ' +
-          'und zeigt Chatverlaeufe, Prompts und persoenliche Daten.'
+        `WARNUNG: DASHBOARD_HOST=${HOST} und DASHBOARD_ALLOWED_IPS ist leer - das Dashboard ist ohne ` +
+          'Passwort und ohne Einschraenkung erreichbar und zeigt Chatverlaeufe, Prompts und ' +
+          'persoenliche Daten ueber Dritte.'
       );
     }
   });
